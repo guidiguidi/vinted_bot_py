@@ -1,7 +1,7 @@
 import requests
 import random
 import time
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError, ProxyError, RequestException
 import configuration_values
 import proxies
 import sys
@@ -89,19 +89,24 @@ class Requester:
             HTTPError: If the request fails after all retries
         """
 
-        # Set proxy for this request
-        if self.proxies:
-            self.session.proxies.update(self.proxies)
-        else:
-            proxy_configured = proxies.configure_proxy(self.session)
-            if self.debug and proxy_configured:
-                logger.debug(f"Using proxy: {self.session.proxies}")
-
         tried = 0
         new_session = False
+        direct_fallback_used = False
         while tried < self.MAX_RETRIES:
             tried += 1
             try:
+                # Reconfigure proxy on every attempt so we can rotate away from bad proxies.
+                if self.proxies:
+                    self.session.proxies.clear()
+                    self.session.proxies.update(self.proxies)
+                else:
+                    if direct_fallback_used:
+                        self.session.proxies.clear()
+                    else:
+                        proxy_configured = proxies.configure_proxy(self.session)
+                        if self.debug and proxy_configured:
+                            logger.debug(f"Using proxy: {self.session.proxies}")
+
                 response = self.session.get(url, params=params)
                 
                 if response.status_code in (401, 404) and tried < self.MAX_RETRIES:
@@ -132,6 +137,16 @@ class Requester:
                         continue
                     return response
             except Exception as e:
+                # Proxy auth issues (e.g. "407 NO_USER") should rotate proxy immediately.
+                # If auto-proxy mode still fails, do one direct fallback before giving up.
+                if isinstance(e, (ProxyError, RequestException)):
+                    err_text = str(e).upper()
+                    is_proxy_auth_issue = ("407" in err_text) or ("NO_USER" in err_text)
+                    if is_proxy_auth_issue and not self.proxies and not direct_fallback_used:
+                        direct_fallback_used = True
+                        logger.warning("Proxy auth failed (407/NO_USER). Retrying request without proxy.")
+                        continue
+
                 if tried == self.MAX_RETRIES:
                     raise e
                 logger.warning(f"Request failed (attempt {tried}): {e}")

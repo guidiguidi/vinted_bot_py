@@ -3,6 +3,8 @@ from pyVintedVN.requester import requester
 from urllib.parse import urlparse, parse_qsl
 from requests.exceptions import HTTPError
 import json
+import gzip
+import zlib
 from typing import List, Dict, Optional
 from pyVintedVN.settings import Urls
 import logging
@@ -65,6 +67,28 @@ class Items:
                 items = data.get("items", [])
             except (json.JSONDecodeError, ValueError) as e:
                 logger.error(f"Failed to decode JSON from Vinted. Status: {response.status_code}")
+                encoding = (response.headers.get("Content-Encoding") or "").lower()
+                content_type = response.headers.get("Content-Type") or ""
+                logger.error(f"Headers: Content-Type={content_type}, Content-Encoding={encoding}")
+
+                # Fallback: try manual decompression for compressed payloads.
+                if encoding in ("gzip", "deflate"):
+                    try:
+                        raw = response.content
+                        decoded = gzip.decompress(raw) if encoding == "gzip" else zlib.decompress(raw)
+                        data = json.loads(decoded.decode("utf-8", errors="replace"))
+                        items = data.get("items", [])
+                        logger.warning("Recovered JSON via manual decompression fallback")
+                    except Exception:
+                        items = None
+                else:
+                    items = None
+
+                if items is not None:
+                    if not json_output:
+                        return [Item(_item) for _item in items]
+                    return items
+
                 # Try to show a bit of the response for debugging
                 try:
                     snippet = response.text[:200]

@@ -3,6 +3,7 @@ import asyncio
 import telegram
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+from telegram.error import BadRequest
 from logger import get_logger
 import db
 import core
@@ -12,6 +13,7 @@ import signal
 import os
 from datetime import datetime
 import time
+from proxies import get_dataimpulse_usage_status, reset_proxy_cache
 
 logger = get_logger(__name__)
 shutdown_event = asyncio.Event()
@@ -26,6 +28,8 @@ STATE_ADMIN_BROADCAST_TEXT = "ADMIN_BROADCAST_TEXT"
 STATE_ADMIN_SEARCH_USER = "ADMIN_SEARCH_USER"
 STATE_ADMIN_ADD_SUB_DAYS = "ADMIN_ADD_SUB_DAYS"
 STATE_WAITING_FOR_QUERY_RENAME = "WAITING_FOR_QUERY_RENAME"
+STATE_ADMIN_ADD_COUNTRY = "ADMIN_ADD_COUNTRY"
+STATE_ADMIN_REMOVE_COUNTRY = "ADMIN_REMOVE_COUNTRY"
 
 # Новые состояния для прокси
 STATE_ADMIN_SET_PROXY_LIST = "ADMIN_SET_PROXY_LIST"
@@ -35,6 +39,16 @@ STATE_ADMIN_SET_PROXY_LINK = "ADMIN_SET_PROXY_LINK"
 STATE_LEGIT_SEND_PHOTOS = "LEGIT_SEND_PHOTOS"
 
 # --- КЛАВИАТУРЫ ---
+
+MAIN_MENU_TEXTS = {
+    "➕ Добавить запрос",
+    "📄 Мои запросы",
+    "📊 Статус",
+    "💳 Оплатить подписку",
+    "🔍 Legit Check",
+    "🆘 Тех. поддержка",
+    "🛠 Админ-панель",
+}
 
 def main_menu_kb(chat_id: int) -> ReplyKeyboardMarkup:
     user = db_tma.get_or_create_user(chat_id)
@@ -94,6 +108,159 @@ def admin_users_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Назад", callback_data="admin_main")]
     ])
 
+
+def _mask_token(raw_token: str) -> str:
+    if not raw_token:
+        return "не задан"
+    if len(raw_token) <= 8:
+        return "*" * len(raw_token)
+    return f"{raw_token[:4]}...{raw_token[-4:]}"
+
+
+def _build_proxy_settings_text() -> str:
+    p_list = db.get_parameter('proxy_list') or "Пусто"
+    p_link = db.get_parameter('proxy_list_link') or "Пусто"
+    p_check = db.get_parameter('check_proxies') or "False"
+    token = db.get_parameter('dataimpulse_api_token') or ""
+    plan_mb = db.get_parameter('dataimpulse_plan_mb') or "0"
+
+    usage = get_dataimpulse_usage_status()
+    if usage.get("ok"):
+        used_mb = usage.get("used_mb", 0)
+        remaining_mb = usage.get("remaining_mb")
+        plan_value = usage.get("plan_mb")
+        if remaining_mb is None:
+            usage_line = f"📦 Трафик (месяц): <b>{used_mb} MB</b> использовано"
+        elif plan_value:
+            usage_line = f"📦 Трафик (месяц): <b>{used_mb} / {plan_value} MB</b> | Осталось: <b>{remaining_mb} MB</b>"
+        else:
+            usage_line = f"📦 Трафик (месяц): <b>{used_mb} MB</b> | Осталось: <b>{remaining_mb} MB</b>"
+    else:
+        usage_line = f"📦 Трафик: <i>{usage.get('error', 'нет данных')}</i>"
+
+    return (
+        "🌐 <b>Настройки прокси</b>\n\n"
+        f"📜 Список: <code>{p_list[:50]}...</code>\n"
+        f"🔗 Ссылка: <code>{p_link}</code>\n"
+        f"✅ Проверка: <b>{p_check}</b>\n"
+        f"🔑 DataImpulse token: <code>{_mask_token(token)}</code>\n"
+        f"📏 Лимит плана (MB): <b>{plan_mb}</b>\n"
+        f"{usage_line}"
+    )
+
+
+def _build_proxy_settings_kb(p_check: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Установить список", callback_data="adm_proxy_set_list")],
+        [InlineKeyboardButton("🔗 Установить ссылку", callback_data="adm_proxy_set_link")],
+        [InlineKeyboardButton("🔑 DataImpulse token", callback_data="edt_param_dataimpulse_api_token")],
+        [InlineKeyboardButton("📏 Лимит MB", callback_data="edt_param_dataimpulse_plan_mb")],
+        [InlineKeyboardButton(f"🔄 Проверка: {p_check}", callback_data="adm_proxy_toggle_check")],
+        [InlineKeyboardButton("🛑 Выключить прокси", callback_data="adm_proxy_disable")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="adm_settings")]
+    ])
+
+
+def _build_countries_text() -> str:
+    countries = db.get_allowlist()
+    if countries == 0:
+        countries_text = "Пусто"
+    else:
+        countries_text = ", ".join(sorted(countries))
+    return (
+        "🌍 <b>Управление странами</b>\n\n"
+        "Фильтр работает по стране продавца.\n"
+        f"Текущий allowlist: <code>{countries_text}</code>"
+    )
+
+
+def _build_countries_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить страну", callback_data="adm_country_add")],
+        [InlineKeyboardButton("➖ Удалить страну", callback_data="adm_country_remove")],
+        [InlineKeyboardButton("🧹 Очистить список", callback_data="adm_country_clear")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="admin_main")]
+    ])
+
+
+def _build_payments_text() -> str:
+    crypto_price = db_tma.get_setting('crypto_price_usdt') or "5.0"
+    legit_price = db_tma.get_setting('crypto_price_bot_legit_usdt') or "10.0"
+    referral_days = db_tma.get_setting('referral_reward_days') or "5"
+    token = db_tma.get_setting('crypto_token') or ""
+    token_masked = _mask_token(token)
+    return (
+        "💰 <b>Настройки платежей</b>\n\n"
+        f"🤖 Цена Basic (USDT): <b>{crypto_price}</b>\n"
+        f"🧷 Цена Bot+Legit (USDT): <b>{legit_price}</b>\n"
+        f"🎁 Referral reward (days): <b>{referral_days}</b>\n"
+        f"🔑 Crypto token: <code>{token_masked}</code>"
+    )
+
+
+def _build_payments_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 Цена Basic", callback_data="edt_cparam_crypto_price_usdt")],
+        [InlineKeyboardButton("🧷 Цена Bot+Legit", callback_data="edt_cparam_crypto_price_bot_legit_usdt")],
+        [InlineKeyboardButton("🎁 Referral days", callback_data="edt_cparam_referral_reward_days")],
+        [InlineKeyboardButton("🔑 Crypto token", callback_data="edt_cparam_crypto_token")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="adm_settings")]
+    ])
+
+
+async def safe_edit_message(query, text, reply_markup=None, parse_mode='HTML'):
+    """
+    Telegram raises BadRequest when edit payload is identical.
+    Ignore that case to keep callback flow stable.
+    """
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            await query.answer("Без изменений")
+            return
+        raise
+
+
+def _validate_admin_param_value(param_key: str, raw_value: str):
+    int_positive_keys = {"query_refresh_delay", "items_per_query", "referral_reward_days"}
+    number_non_negative_keys = {"dataimpulse_plan_mb"}
+    float_positive_keys = {"crypto_price_usdt", "crypto_price_bot_legit_usdt"}
+
+    value = raw_value.strip()
+    if not value:
+        return False, "Значение не может быть пустым."
+
+    if param_key in int_positive_keys:
+        try:
+            parsed = int(value)
+            if parsed <= 0:
+                return False, "Нужно число больше 0."
+            return True, str(parsed)
+        except ValueError:
+            return False, "Нужно целое число."
+
+    if param_key in number_non_negative_keys:
+        try:
+            parsed = float(value.replace(",", "."))
+            if parsed < 0:
+                return False, "Значение не может быть отрицательным."
+            normalized = str(int(parsed)) if parsed.is_integer() else str(parsed)
+            return True, normalized
+        except ValueError:
+            return False, "Нужно число (например: 51200)."
+
+    if param_key in float_positive_keys:
+        try:
+            parsed = float(value.replace(",", "."))
+            if parsed <= 0:
+                return False, "Нужно число больше 0."
+            return True, str(parsed)
+        except ValueError:
+            return False, "Нужно число (например: 5.0)."
+
+    return True, value
+
 # --- ОБРАБОТЧИКИ ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE, authorized_chat_ids: set):
@@ -132,16 +299,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- FSM АДМИНА ---
     if user_data.get('state') == STATE_ADMIN_EDIT_PARAM:
         p_type, key = user_data.get('edit_target')
+        if text == "❌ Отмена":
+            user_data['state'] = None
+            await update.message.reply_text("Редактирование отменено.", reply_markup=main_menu_kb(chat_id))
+            return
+        if text in MAIN_MENU_TEXTS:
+            await update.message.reply_text(
+                f"⚠️ Сейчас редактируется <b>{key}</b>.\nОтправьте новое значение или нажмите <b>❌ Отмена</b>.",
+                parse_mode='HTML',
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("❌ Отмена")]], resize_keyboard=True)
+            )
+            return
+
+        is_valid, validated_value = _validate_admin_param_value(key, text)
+        if not is_valid:
+            await update.message.reply_text(
+                f"❌ {validated_value}\nПопробуйте еще раз для <b>{key}</b> или нажмите <b>❌ Отмена</b>.",
+                parse_mode='HTML',
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("❌ Отмена")]], resize_keyboard=True)
+            )
+            return
+
         try:
             if p_type == "param":
-                db.set_parameter(key, text)
+                db.set_parameter(key, validated_value)
             else:
                 import sqlite3
                 conn = sqlite3.connect("vinted_notifications.db")
-                conn.execute("UPDATE commercial_settings SET value=? WHERE key=?", (text, key))
+                conn.execute("UPDATE commercial_settings SET value=? WHERE key=?", (validated_value, key))
                 conn.commit()
                 conn.close()
-            await update.message.reply_text(f"✅ Параметр <b>{key}</b> обновлен: <code>{text}</code>", parse_mode='HTML', reply_markup=main_menu_kb(chat_id))
+            await update.message.reply_text(f"✅ Параметр <b>{key}</b> обновлен: <code>{validated_value}</code>", parse_mode='HTML', reply_markup=main_menu_kb(chat_id))
         except Exception as e:
             logger.error(f"Error updating parameter {key}: {e}", exc_info=True)
             await update.message.reply_text("❌ Ошибка обновления.", reply_markup=main_menu_kb(chat_id))
@@ -209,12 +397,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_data.get('state') == STATE_ADMIN_ADD_SUB_DAYS:
         try:
-            days = int(text)
+            days = int(text.strip())
+            if days <= 0:
+                raise ValueError
             target_id = user_data.get('target_user_id')
-            db_tma.set_user_subscription(target_id, days)
-            await update.message.reply_text(f"✅ Подписка пользователя <code>{target_id}</code> обновлена (+{days} дней).", parse_mode='HTML', reply_markup=main_menu_kb(chat_id))
+            ok = db_tma.add_user_subscription_days(target_id, days)
+            if ok:
+                await update.message.reply_text(f"✅ Пользователю <code>{target_id}</code> добавлено <b>+{days}</b> дней.", parse_mode='HTML', reply_markup=main_menu_kb(chat_id))
+            else:
+                await update.message.reply_text("❌ Пользователь не найден.", reply_markup=main_menu_kb(chat_id))
         except ValueError:
-            await update.message.reply_text("❌ Введите число.", reply_markup=main_menu_kb(chat_id))
+            await update.message.reply_text("❌ Введите целое число дней больше 0.", reply_markup=main_menu_kb(chat_id))
+        user_data['state'] = None
+        return
+
+    if user_data.get('state') == STATE_ADMIN_ADD_COUNTRY:
+        if text == "❌ Отмена":
+            user_data['state'] = None
+            await update.message.reply_text("Отменено.", reply_markup=main_menu_kb(chat_id))
+            return
+        msg, countries = core.process_add_country(text.upper())
+        countries_text = "Пусто" if countries == 0 else ", ".join(sorted(countries))
+        await update.message.reply_text(
+            f"✅ {msg}\nТекущий список: <code>{countries_text}</code>",
+            parse_mode='HTML',
+            reply_markup=main_menu_kb(chat_id)
+        )
+        user_data['state'] = None
+        return
+
+    if user_data.get('state') == STATE_ADMIN_REMOVE_COUNTRY:
+        if text == "❌ Отмена":
+            user_data['state'] = None
+            await update.message.reply_text("Отменено.", reply_markup=main_menu_kb(chat_id))
+            return
+        msg, countries = core.process_remove_country(text.upper())
+        countries_text = "Пусто" if countries == 0 else ", ".join(sorted(countries))
+        await update.message.reply_text(
+            f"✅ {msg}\nТекущий список: <code>{countries_text}</code>",
+            parse_mode='HTML',
+            reply_markup=main_menu_kb(chat_id)
+        )
         user_data['state'] = None
         return
 
@@ -389,6 +612,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Вы забанены.", show_alert=True)
         return
 
+    admin_actions = (
+        data.startswith("adm_")
+        or data.startswith("edt_")
+        or data.startswith("gen_key_")
+        or data in ("set_scraper", "set_proxies", "set_payments", "admin_main")
+    )
+    if admin_actions and not db_tma.is_admin(chat_id):
+        await query.answer("Недостаточно прав.", show_alert=True)
+        return
+
     await query.answer()
 
     # --- LEGIT CHECK CALLBACKS ---
@@ -411,10 +644,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = db_tma.admin_get_stats()
         msg = f"📊 <b>Статистика бота</b>\n\n👤 Пользователей: <b>{stats.get('total_users', 0)}</b>\n🟢 Активных: <b>{stats.get('active_users', 0)}</b>\n💵 Доход: <b>${stats.get('total_revenue', 0)}</b>"
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_main")]]), parse_mode='HTML')
+    elif data == "adm_countries":
+        await query.edit_message_text(_build_countries_text(), reply_markup=_build_countries_kb(), parse_mode='HTML')
     elif data == "adm_users_menu": await query.edit_message_text("👥 <b>Управление пользователями</b>", reply_markup=admin_users_kb(), parse_mode='HTML')
     elif data == "adm_list_users":
         users = db_tma.admin_get_users(limit=10)
-        kb_buttons = [[InlineKeyboardButton(f"{'🟢' if 'days' in db_tma.get_user_status(u['id']) else '🔴'} {u['username'] or u['telegram_id']}", callback_data=f"adm_uinfo_{u['telegram_id']}")] for u in users]
+        kb_buttons = [[InlineKeyboardButton(f"{'🟢' if db_tma.has_active_subscription(u['id']) else '🔴'} {u['username'] or u['telegram_id']}", callback_data=f"adm_uinfo_{u['telegram_id']}")] for u in users]
         kb_buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="adm_users_menu")])
         await query.edit_message_text("👥 <b>Последние 10 пользователей:</b>", reply_markup=InlineKeyboardMarkup(kb_buttons), parse_mode='HTML')
     elif data == "adm_search_user":
@@ -482,25 +717,30 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open("logs/vinted.log", "r") as f: last_lines = "".join(f.readlines()[-15:])
             await query.message.reply_text(f"📜 <b>Логи:</b>\n<pre>{last_lines}</pre>", parse_mode='HTML')
         except: await query.edit_message_text("❌ Ошибка логов.")
-    elif data == "adm_settings": await query.edit_message_text("⚙️ <b>Настройки</b>", reply_markup=admin_settings_kb(), parse_mode='HTML')
+    elif data == "adm_settings":
+        await safe_edit_message(query, "⚙️ <b>Настройки</b>", reply_markup=admin_settings_kb(), parse_mode='HTML')
+    elif data == "set_payments":
+        await safe_edit_message(query, _build_payments_text(), reply_markup=_build_payments_kb(), parse_mode='HTML')
+    elif data == "adm_country_add":
+        user_data['state'] = STATE_ADMIN_ADD_COUNTRY
+        await query.message.reply_text("➕ Введите код страны (например, <code>PL</code>):", parse_mode='HTML')
+    elif data == "adm_country_remove":
+        user_data['state'] = STATE_ADMIN_REMOVE_COUNTRY
+        await query.message.reply_text("➖ Введите код страны для удаления (например, <code>PL</code>):", parse_mode='HTML')
+    elif data == "adm_country_clear":
+        db.clear_allowlist()
+        await safe_edit_message(query, _build_countries_text(), reply_markup=_build_countries_kb(), parse_mode='HTML')
     elif data == "set_scraper":
         delay = db.get_parameter('query_refresh_delay'); items = db.get_parameter('items_per_query')
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"⏱ Задержка: {delay}с", callback_data="edt_param_query_refresh_delay")], [InlineKeyboardButton(f"📦 Кол-во: {items}", callback_data="edt_param_items_per_query")], [InlineKeyboardButton("⬅️ Назад", callback_data="adm_settings")]])
-        await query.edit_message_text("🤖 <b>Настройки скрейпера</b>", reply_markup=kb, parse_mode='HTML')
+        await safe_edit_message(query, "🤖 <b>Настройки скрейпера</b>", reply_markup=kb, parse_mode='HTML')
     
     # --- ПРОКСИ ---
     elif data == "set_proxies":
-        p_list = db.get_parameter('proxy_list') or "Пусто"
-        p_link = db.get_parameter('proxy_list_link') or "Пусто"
         p_check = db.get_parameter('check_proxies') or "False"
-        msg = f"🌐 <b>Настройки прокси</b>\n\n📜 Список: <code>{p_list[:50]}...</code>\n🔗 Ссылка: <code>{p_link}</code>\n✅ Проверка: <b>{p_check}</b>"
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Установить список", callback_data="adm_proxy_set_list")],
-            [InlineKeyboardButton("🔗 Установить ссылку", callback_data="adm_proxy_set_link")],
-            [InlineKeyboardButton(f"🔄 Проверка: {p_check}", callback_data="adm_proxy_toggle_check")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="adm_settings")]
-        ])
-        await query.edit_message_text(msg, reply_markup=kb, parse_mode='HTML')
+        msg = _build_proxy_settings_text()
+        kb = _build_proxy_settings_kb(p_check)
+        await safe_edit_message(query, msg, reply_markup=kb, parse_mode='HTML')
     
     elif data == "adm_proxy_set_list":
         user_data['state'] = STATE_ADMIN_SET_PROXY_LIST
@@ -515,17 +755,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_val = "True" if current != "True" else "False"
         db.set_parameter('check_proxies', new_val)
         # Перерисовываем меню прокси
-        p_list = db.get_parameter('proxy_list') or "Пусто"
-        p_link = db.get_parameter('proxy_list_link') or "Пусто"
-        p_check = new_val
-        msg = f"🌐 <b>Настройки прокси</b>\n\n📜 Список: <code>{p_list[:50]}...</code>\n🔗 Ссылка: <code>{p_link}</code>\n✅ Проверка: <b>{p_check}</b>"
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Установить список", callback_data="adm_proxy_set_list")],
-            [InlineKeyboardButton("🔗 Установить ссылку", callback_data="adm_proxy_set_link")],
-            [InlineKeyboardButton(f"🔄 Проверка: {p_check}", callback_data="adm_proxy_toggle_check")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="adm_settings")]
-        ])
-        await query.edit_message_text(msg, reply_markup=kb, parse_mode='HTML')
+        msg = _build_proxy_settings_text()
+        kb = _build_proxy_settings_kb(new_val)
+        await safe_edit_message(query, msg, reply_markup=kb, parse_mode='HTML')
+    elif data == "adm_proxy_disable":
+        db.set_parameter('proxy_list', '')
+        db.set_parameter('proxy_list_link', '')
+        db.set_parameter('check_proxies', 'False')
+        reset_proxy_cache()
+        msg = _build_proxy_settings_text()
+        kb = _build_proxy_settings_kb("False")
+        await safe_edit_message(query, msg, reply_markup=kb, parse_mode='HTML')
 
     elif data == "adm_clear_items_confirm":
         kb = InlineKeyboardMarkup([
@@ -540,7 +780,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("edt_"):
         parts = data.split("_", 2); user_data['state'] = STATE_ADMIN_EDIT_PARAM; user_data['edit_target'] = (parts[1], parts[2])
-        await query.message.reply_text(f"📝 Новое значение для {parts[2]}:")
+        await query.message.reply_text(
+            f"📝 Новое значение для {parts[2]}:\n\nДля отмены нажмите <b>❌ Отмена</b>.",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("❌ Отмена")]], resize_keyboard=True)
+        )
     elif data == "pay_crypto_select":
         p1 = db_tma.get_setting('crypto_price_usdt') or '5'; p2 = db_tma.get_setting('crypto_price_bot_legit_usdt') or '10'
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"🤖 Bot ({p1}$)", callback_data="pay_crypto_basic")], [InlineKeyboardButton(f"🤖 Bot + Legit ({p2}$)", callback_data="pay_crypto_legit")], [InlineKeyboardButton("⬅️ Назад", callback_data="pay_back")]])

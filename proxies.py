@@ -2,10 +2,13 @@ import random
 import requests
 import time
 import os
+import csv
 from requests.exceptions import RequestException
 import configuration_values
 import concurrent.futures
-from typing import List, Optional
+from datetime import datetime
+from io import StringIO
+from typing import List, Optional, Tuple, Any
 from logger import get_logger
 
 # Get logger for this module
@@ -23,6 +26,17 @@ _TEST_TIMEOUT = 10  # Increased timeout for rotating proxies
 MAX_PROXY_WORKERS = 10
 # Time interval in seconds after which proxies should be rechecked (6 hours)
 PROXY_RECHECK_INTERVAL = 6 * 60 * 60
+_DATAIMPULSE_USAGE_URL = "https://data.dataimpulse.com/api/details/usage_export_get"
+
+
+def reset_proxy_cache() -> None:
+    """
+    Reset in-memory proxy cache so new settings apply immediately.
+    """
+    global _PROXY_CACHE, _PROXY_CACHE_INITIALIZED, _SINGLE_PROXY
+    _PROXY_CACHE = None
+    _PROXY_CACHE_INITIALIZED = False
+    _SINGLE_PROXY = None
 
 
 def load_user_agents_from_file(filename: str = "user_agents.txt") -> List[str]:
@@ -262,23 +276,8 @@ def get_current_ip(session: requests.Session = None) -> str:
     Returns:
         str: Current IP address or error message
     """
-    try:
-        if session is None:
-            session = requests.Session()
-            # Configure proxy if available
-            configure_proxy(session)
-
-        # Use a reliable IP checking service
-        response = session.get('https://httpbin.org/ip', timeout=10)
-
-        if response.status_code == 200:
-            ip_data = response.json()
-            return ip_data.get('origin', 'IP not found')
-        else:
-            return f"Error: HTTP {response.status_code}"
-
-    except Exception as e:
-        return f"Error getting IP: {str(e)}"
+    # Avoid proxy traffic for external IP checks.
+    return "IP check disabled"
 def convert_proxy_string_to_dict(proxy: Optional[str]) -> dict:
     """
     Convert a proxy string to a dictionary format.
@@ -332,9 +331,6 @@ def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> b
     if proxy is None:
         session.proxies.clear()
         logger.info("Using direct connection (no proxy)")
-        # Check direct IP
-        current_ip = get_current_ip(session)
-        logger.info(f"Direct connection IP: {current_ip}")
         return False
 
     if isinstance(proxy, str):
@@ -342,11 +338,6 @@ def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> b
 
     session.proxies.update(proxy)
     logger.info(f"Proxy configured: {proxy}")
-
-    # Check proxy IP
-    current_ip = get_current_ip(session)
-    logger.info(f"Proxy IP: {current_ip}")
-
     return True
 
 
@@ -356,3 +347,177 @@ def reload_user_agents():
     """
     global USER_AGENTS
     USER_AGENTS = load_user_agents_from_file()
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        cleaned = str(value).strip().replace(",", ".")
+        if not cleaned:
+            return None
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_dataimpulse_csv(raw_text: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Parse CSV payload similar to DataImpulse usage export.
+    Returns total bytes and bytes spent on httpbin rows.
+    """
+    total_bytes = 0
+    httpbin_bytes = 0
+    found = False
+
+    reader = csv.reader(StringIO(raw_text))
+    for row in reader:
+        if len(row) < 8:
+            continue
+        bytes_raw = str(row[7]).replace(" ", "")
+        if not bytes_raw.isdigit():
+            continue
+        row_bytes = int(bytes_raw)
+        total_bytes += row_bytes
+        found = True
+        host = row[2].lower() if len(row) > 2 else ""
+        if "httpbin.org" in host:
+            httpbin_bytes += row_bytes
+
+    if not found:
+        return None, None
+    return total_bytes, httpbin_bytes
+
+
+def _extract_usage_from_json(payload: Any) -> Tuple[Optional[int], Optional[int], Optional[float]]:
+    """
+    Extract (used_bytes, httpbin_bytes, remaining_mb) from different JSON schemas.
+    """
+    remaining_mb = None
+
+    if isinstance(payload, dict):
+        for key in ("remaining_mb", "remainingMb", "left_mb", "leftMb", "available_mb", "availableMb"):
+            if key in payload:
+                remaining_mb = _to_float(payload.get(key))
+                break
+
+        for key in ("data", "rows", "result", "items"):
+            if key in payload:
+                used, httpbin, inner_remaining = _extract_usage_from_json(payload[key])
+                return used, httpbin, remaining_mb if remaining_mb is not None else inner_remaining
+
+        if "used_bytes" in payload:
+            used_val = payload.get("used_bytes")
+            used = int(used_val) if str(used_val).isdigit() else None
+            return used, 0, remaining_mb
+
+        return None, None, remaining_mb
+
+    if isinstance(payload, list):
+        total_bytes = 0
+        httpbin_bytes = 0
+        found = False
+        for row in payload:
+            if isinstance(row, dict):
+                host = str(row.get("host") or row.get("target") or "").lower()
+                candidate_keys = ("bytes", "used_bytes", "traffic_bytes", "bandwidth_bytes")
+                row_bytes = None
+                for key in candidate_keys:
+                    val = row.get(key)
+                    if str(val).isdigit():
+                        row_bytes = int(val)
+                        break
+                if row_bytes is not None:
+                    total_bytes += row_bytes
+                    found = True
+                    if "httpbin.org" in host:
+                        httpbin_bytes += row_bytes
+            elif isinstance(row, list) and len(row) > 7:
+                if str(row[7]).isdigit():
+                    row_bytes = int(row[7])
+                    total_bytes += row_bytes
+                    found = True
+                    host = str(row[2]).lower() if len(row) > 2 else ""
+                    if "httpbin.org" in host:
+                        httpbin_bytes += row_bytes
+        if found:
+            return total_bytes, httpbin_bytes, remaining_mb
+
+    return None, None, remaining_mb
+
+
+def get_dataimpulse_usage_status() -> dict:
+    """
+    Read DataImpulse usage and compute remaining proxy MB.
+    Required DB params:
+    - dataimpulse_api_token
+    Optional:
+    - dataimpulse_plan_mb
+    - dataimpulse_tz
+    """
+    import db
+
+    token = (db.get_parameter("dataimpulse_api_token") or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token:
+        return {"ok": False, "error": "API token is not configured"}
+
+    tz = (db.get_parameter("dataimpulse_tz") or "Europe/Kyiv").strip() or "Europe/Kyiv"
+    plan_mb_raw = db.get_parameter("dataimpulse_plan_mb") or "0"
+    plan_mb = _to_float(plan_mb_raw) or 0.0
+
+    now = datetime.utcnow()
+    start_of_month = now.replace(day=1).strftime("%Y-%m-%d")
+    end_date = now.strftime("%Y-%m-%d")
+
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "gzip, deflate",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Origin": "https://app.dataimpulse.com",
+        "Referer": "https://app.dataimpulse.com/",
+    }
+    payload = {"startDate": start_of_month, "endDate": end_date, "tz": tz}
+
+    try:
+        response = requests.post(_DATAIMPULSE_USAGE_URL, headers=headers, json=payload, timeout=20)
+    except Exception as e:
+        return {"ok": False, "error": f"request failed: {e}"}
+
+    if response.status_code != 200:
+        return {"ok": False, "error": f"HTTP {response.status_code}"}
+
+    used_bytes = None
+    httpbin_bytes = 0
+    remaining_mb = None
+
+    try:
+        body = response.json()
+        used_bytes, httpbin_bytes, remaining_mb = _extract_usage_from_json(body)
+    except ValueError:
+        used_bytes, httpbin_bytes = _parse_dataimpulse_csv(response.text)
+
+    if used_bytes is None:
+        return {"ok": False, "error": "unable to parse usage payload"}
+
+    used_mb = round(used_bytes / (1024 * 1024), 2)
+    httpbin_mb = round((httpbin_bytes or 0) / (1024 * 1024), 2)
+
+    if remaining_mb is None and plan_mb > 0:
+        remaining_mb = round(max(plan_mb - used_mb, 0.0), 2)
+
+    return {
+        "ok": True,
+        "used_mb": used_mb,
+        "remaining_mb": remaining_mb,
+        "plan_mb": plan_mb if plan_mb > 0 else None,
+        "httpbin_mb": httpbin_mb,
+        "period_start": start_of_month,
+        "period_end": end_date,
+        "tz": tz,
+    }

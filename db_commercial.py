@@ -358,6 +358,37 @@ def set_user_subscription(telegram_id, days):
     conn.commit()
     conn.close()
 
+
+def add_user_subscription_days(telegram_id, days):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now = int(time.time())
+    cursor.execute("SELECT subscription_expiry FROM users WHERE telegram_id = ?", (telegram_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+
+    current_expiry = row['subscription_expiry'] or 0
+    base_ts = max(current_expiry, now)
+    new_expiry = base_ts + (days * 24 * 3600)
+    cursor.execute("UPDATE users SET subscription_expiry = ? WHERE telegram_id = ?", (new_expiry, telegram_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def has_active_subscription(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now = int(time.time())
+    cursor.execute("SELECT subscription_expiry FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return False
+    return (row['subscription_expiry'] or 0) > now
+
 def set_admin_status(telegram_id, status: bool):
     conn = get_db_connection()
     cursor = conn.cursor()

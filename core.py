@@ -156,13 +156,6 @@ def process_items(queue):
     Args:
         queue (Queue): The queue to put the items in
     """
-    from proxies import get_current_ip
-    try:
-        current_ip = get_current_ip()
-        logger.info(f"Current request IP: {current_ip}")
-    except:
-        pass
-
     all_queries = db.get_queries()
     
     # Optimization 3 & 4: Consolidation and Local Filtering via SearchManager

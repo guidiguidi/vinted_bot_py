@@ -307,7 +307,11 @@ def set_parameter(key, value):
     try:
         conn = sqlite3.connect("vinted_notifications.db")
         cursor = conn.cursor()
-        cursor.execute("UPDATE parameters SET value=? WHERE key=?", (value, key))
+        cursor.execute(
+            "INSERT INTO parameters (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
         conn.commit()
     except Exception:
         print_exc()
