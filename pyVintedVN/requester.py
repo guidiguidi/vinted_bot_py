@@ -102,8 +102,20 @@ class Requester:
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         }
+        self._session = None
+        self._session_pid = None
 
-        self._init_session(rotate_proxy=False)
+    @property
+    def session(self) -> tls_client.Session:
+        current_pid = os.getpid()
+        if getattr(self, "_session_pid", None) != current_pid or getattr(self, "_session", None) is None:
+            self._init_session(rotate_proxy=False)
+        return self._session
+
+    @session.setter
+    def session(self, value):
+        self._session = value
+        self._session_pid = os.getpid()
 
     def _resolve_proxy(self) -> Optional[dict]:
         """Dynamically resolve sticky proxy from manual setting or proxy list."""
@@ -118,22 +130,23 @@ class Requester:
         """
         Initialize or reset the underlying tls-client session, binding to a sticky proxy.
         """
+        self._session_pid = os.getpid()
         if rotate_proxy or self.current_proxy is None:
             self.current_proxy = self._resolve_proxy()
             if self.current_proxy:
-                logger.info(f"[Requester] Bound to sticky proxy: {self.current_proxy}")
+                logger.info(f"[Requester (PID {self._session_pid})] Bound to sticky proxy: {self.current_proxy}")
 
-        self.session = tls_client.Session(
+        self._session = tls_client.Session(
             client_identifier=self.CLIENT_IDENTIFIER,
             random_tls_extension_order=True,
         )
 
         if self.current_proxy:
-            self.session.proxies = self.current_proxy
+            self._session.proxies = self.current_proxy
         else:
-            self.session.proxies = {}
+            self._session.proxies = {}
 
-        self.session.headers.update(self.HEADER)
+        self._session.headers.update(self.HEADER)
         self._warmed_locales.clear()
 
     def set_locale(self, locale: str) -> None:

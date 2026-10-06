@@ -781,6 +781,7 @@ def run_bot_in_process(queue: multiprocessing.Queue):
             await application.updater.start_polling(drop_pending_updates=True)
             await shutdown_event.wait()
             await application.updater.stop()
+            await application.stop()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(main())

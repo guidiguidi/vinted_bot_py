@@ -156,18 +156,14 @@ def get_user_country(profile_id):
     return user_country
 
 
-# Initialize SearchManager as a module-level singleton
-vinted_instance = Vinted()
+_search_manager = None
 
-# Fix 1: Set a random proxy for pyVintedVN singleton requester if available
-from proxies import get_random_proxy, convert_proxy_string_to_dict
-proxy = get_random_proxy()
-if proxy:
-    # Use the convert_proxy_string_to_dict from proxies.py to format it
-    requester.proxies = convert_proxy_string_to_dict(proxy)
-    logger.info(f"Fixed proxy set for pyVintedVN: {requester.proxies}")
+def get_search_manager():
+    global _search_manager
+    if _search_manager is None:
+        _search_manager = SearchManager(Vinted())
+    return _search_manager
 
-search_manager = SearchManager(vinted_instance)
 
 def process_items(queue):
     """
@@ -181,7 +177,8 @@ def process_items(queue):
     logger.info(f"Processing items for {len(all_queries)} queries...")
     
     # Optimization 3 & 4: Consolidation and Local Filtering via SearchManager
-    results = search_manager.consolidate_and_search(all_queries)
+    sm = get_search_manager()
+    results = sm.consolidate_and_search(all_queries)
 
     for all_items, query_id in results:
         try:

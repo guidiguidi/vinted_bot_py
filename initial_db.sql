@@ -68,16 +68,16 @@ CREATE INDEX IF NOT EXISTS idx_queries_query ON queries(query);
 CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
 
 -- Начальные пользователи
-INSERT OR IGNORE INTO users (id, telegram_id, username, is_admin, is_banned, created_at) VALUES
-(1, 525127130, 'admin', 1, 0, 1700000000),
-(2, 8025919160, 'paragein', 1, 0, 1700000000),
-(3, 913862074, 'admin', 1, 0, 1700000000),
-(4, 7636899263, 's4uce10', 1, 0, 1700000000),
-(5, 899565284, 'black1resale', 1, 0, 1700000000),
-(6, 732024902, 'user_732024902', 1, 0, 1700000000),
-(7, 944233674, 'user_944233674', 1, 0, 1700000000),
-(8, 8666520865, 'hangetdUnsu', 1, 0, 1700000000),
-(9, 5141940909, 'llinkovv', 1, 0, 1700000000);
+INSERT OR IGNORE INTO users (id, telegram_id, username, is_admin, is_banned) VALUES
+(1, 525127130, 'admin', 1, 0),
+(2, 8025919160, 'paragein', 1, 0),
+(3, 913862074, 'admin', 1, 0),
+(4, 7636899263, 's4uce10', 1, 0),
+(5, 899565284, 'black1resale', 1, 0),
+(6, 732024902, 'user_732024902', 1, 0),
+(7, 944233674, 'user_944233674', 1, 0),
+(8, 8666520865, 'hangetdUnsu', 1, 0),
+(9, 5141940909, 'llinkovv', 1, 0);
 
 -- Начальные поисковые запросы
 INSERT OR IGNORE INTO queries (id, query, last_item, query_name, user_id) VALUES

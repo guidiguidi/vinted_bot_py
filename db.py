@@ -17,6 +17,14 @@ def _init_db_if_needed(conn):
                     conn.executescript(f.read())
                 conn.commit()
         else:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            if cursor.fetchone():
+                cursor.execute("PRAGMA table_info(users)")
+                cols = [col[1] for col in cursor.fetchall()]
+                if "created_at" not in cols:
+                    cursor.execute("ALTER TABLE users ADD COLUMN created_at INTEGER DEFAULT 0")
+                    conn.commit()
+
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='queries'")
             if cursor.fetchone():
                 cursor.execute("SELECT COUNT(*) FROM queries")

@@ -106,6 +106,8 @@ def initialize_database():
 
 def scraper_process(items_queue):
     logger.info("Scrape process started")
+    from pyVintedVN.requester import requester
+    requester._init_session(rotate_proxy=False)
     current_query_refresh_delay = int(db.get_parameter("query_refresh_delay") or 60)
     logger.info(f"Using query refresh delay of {current_query_refresh_delay} seconds")
     int(time.time()) - 180
