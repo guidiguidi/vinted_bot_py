@@ -10,11 +10,21 @@ def _init_db_if_needed(conn):
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parameters'")
-        if not cursor.fetchone():
+        table_exists = cursor.fetchone()
+        if not table_exists:
             if os.path.exists(SQL_INIT_PATH):
                 with open(SQL_INIT_PATH, "r", encoding="utf-8") as f:
                     conn.executescript(f.read())
                 conn.commit()
+        else:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='queries'")
+            if cursor.fetchone():
+                cursor.execute("SELECT COUNT(*) FROM queries")
+                cnt = cursor.fetchone()[0]
+                if cnt == 0 and os.path.exists(SQL_INIT_PATH):
+                    with open(SQL_INIT_PATH, "r", encoding="utf-8") as f:
+                        conn.executescript(f.read())
+                    conn.commit()
     except Exception:
         print_exc()
 

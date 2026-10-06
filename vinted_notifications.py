@@ -35,11 +35,34 @@ def start_health_server():
         import http.server
         import socketserver
         import threading
+        import json
+        import db_commercial as db_tma
+        import proxies
 
         port = int(port_str)
 
         class HealthHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                if self.path in ("/debug", "/status"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.end_headers()
+                    try:
+                        queries_cnt = db.get_total_queries_count()
+                        users_cnt = db_tma.get_all_users_count()
+                        proxies_list = proxies.get_proxies_list()
+                        debug_data = {
+                            "status": "ok",
+                            "queries_count": queries_cnt,
+                            "users_count": users_cnt,
+                            "proxies_count": len(proxies_list),
+                            "server_time": int(time.time()),
+                        }
+                        self.wfile.write((json.dumps(debug_data, indent=2) + "\n").encode("utf-8"))
+                    except Exception as ex:
+                        self.wfile.write(f'{{"error": "{ex}"}}\n'.encode("utf-8"))
+                    return
+
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()

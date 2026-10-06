@@ -8,18 +8,21 @@ class Item:
     This class parses and stores various attributes of a Vinted item,
     such as id, title, brand, size, price, etc.
     """
-    def __init__(self, data):
+    def __init__(self, data, domain=None):
         """
         Initialize an Item with data from the Vinted API.
 
         Args:
             data (dict): The item data from the Vinted API.
+            domain (str, optional): The Vinted domain (e.g. www.vinted.de).
         """
         self.raw_data = data
         prod = data.get("productItem", data) if isinstance(data, dict) else {}
 
         self.id = prod.get("id") or (data.get("id") if isinstance(data, dict) else None)
         self.title = prod.get("title") or (data.get("title", "") if isinstance(data, dict) else "")
+
+        base_domain = domain or "www.vinted.fr"
 
         # Brand title
         if isinstance(data, dict) and "brand_title" in data:
@@ -72,13 +75,13 @@ class Item:
         if str(raw_url).startswith("http"):
             self.url = str(raw_url)
         else:
-            self.url = f"https://www.vinted.fr{raw_url}"
+            self.url = f"https://{base_domain}{raw_url}"
 
         # Buy URL
         if isinstance(data, dict) and "url" in data and "items" in str(data["url"]):
             self.buy_url = str(data["url"]).split("items")[0] + "transaction/buy/new?source_screen=item&transaction%5Bitem_id%5D=" + str(self.id)
         else:
-            self.buy_url = f"https://www.vinted.fr/transaction/buy/new?source_screen=item&transaction%5Bitem_id%5D={self.id}"
+            self.buy_url = f"https://{base_domain}/transaction/buy/new?source_screen=item&transaction%5Bitem_id%5D={self.id}"
 
         # Timestamp
         ts = None

@@ -86,7 +86,7 @@ class Items:
 
                 if items is not None:
                     if not json_output:
-                        return [Item(_item) for _item in items]
+                        return [Item(_item, domain=locale) for _item in items]
                     return items
 
                 # Try to show a bit of the response for debugging
@@ -99,7 +99,7 @@ class Items:
 
             # Return either Item objects or raw JSON data
             if not json_output:
-                return [Item(_item) for _item in items]
+                return [Item(_item, domain=locale) for _item in items]
             else:
                 return items
 

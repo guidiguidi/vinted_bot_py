@@ -404,6 +404,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data['state'] = None
         return
 
+    # --- АВТОМАТИЧЕСКАЯ ОБРАБОТКА ВСТАВЛЕННОЙ ССЫЛКИ VINTED ---
+    if ("vinted." in text.lower() or text.startswith("http")) and ("catalog" in text.lower() or "items" in text.lower() or "search_text" in text.lower() or "brand_ids" in text.lower()):
+        try:
+            msg, success = core.process_query(text.strip(), user_id=chat_id)
+            await update.message.reply_text(f"Результат: {msg}", reply_markup=main_menu_kb(chat_id), parse_mode='HTML')
+            return
+        except Exception as e:
+            logger.error(f"Error auto-processing direct query link: {e}", exc_info=True)
+            await update.message.reply_text("❌ Ошибка при обработке ссылки.", reply_markup=main_menu_kb(chat_id))
+            return
+
     # --- МЕНЮ ---
     if text == "➕ Добавить запрос":
         user_data['state'] = STATE_WAITING_FOR_QUERY

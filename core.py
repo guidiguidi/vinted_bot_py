@@ -178,6 +178,7 @@ def process_items(queue):
         queue (Queue): The queue to put the items in
     """
     all_queries = db.get_queries()
+    logger.info(f"Processing items for {len(all_queries)} queries...")
     
     # Optimization 3 & 4: Consolidation and Local Filtering via SearchManager
     results = search_manager.consolidate_and_search(all_queries)
@@ -189,40 +190,38 @@ def process_items(queue):
             last_item_id_str = db.get_last_timestamp(query_id) # Column is reused for item_id
             last_item_id = int(last_item_id_str) if last_item_id_str and str(last_item_id_str).isdigit() else 0
 
-            # Filter to only include items with ID > last_item_id
-            # AND published within the last 1 minute (60 seconds)
             current_time = int(time.time())
-            MAX_AGE = 600 # 10 minutes (prevents dropping items during longer scrape cycles)
+            MAX_AGE = 1800 # 30 minutes
             
-            new_items = [
-                item for item in all_items 
-                if int(item.id) > last_item_id and (current_time - item.raw_timestamp) < MAX_AGE
-            ]
+            all_ids = [int(item.id) for item in all_items if hasattr(item, 'id') and item.id and str(item.id).isdigit()]
 
-            if new_items:
-                # Update max item_id in DB to avoid processing the same items again
-                # We use the max ID from all_items to stay up to date, even if we filtered some out
-                all_ids = [int(item.id) for item in all_items]
+            # If last_item_id was 0, it's the first run for this query.
+            if last_item_id == 0:
                 if all_ids:
                     db.update_last_timestamp(query_id, max(all_ids))
-                
-                # If last_item_id was 0, it's the first run for this query.
-                if last_item_id == 0:
-                    logger.info(f"First run for query_id {query_id}. Initialized database. No items sent.")
-                    continue
+                # Send top 3 initial items so user immediately sees that the query is working!
+                initial_items = all_items[:3]
+                if initial_items:
+                    queue.put((initial_items, query_id))
+                    logger.info(f"First run for query_id {query_id}. Sent {len(initial_items)} initial items.")
+                continue
 
+            new_items = [
+                item for item in all_items 
+                if hasattr(item, 'id') and item.id and str(item.id).isdigit() and int(item.id) > last_item_id and abs(current_time - item.raw_timestamp) < MAX_AGE
+            ]
+
+            if all_ids:
+                db.update_last_timestamp(query_id, max(all_ids))
+
+            if new_items:
                 queue.put((new_items, query_id))
                 logger.info(f"Scraped {len(new_items)} FRESH items for query_id: {query_id}")
             else:
-                # Even if no fresh items, we should update the last_item_id to the latest seen
-                # so we don't keep checking old items in the next iteration
-                all_ids = [int(item.id) for item in all_items]
-                if all_ids:
-                    db.update_last_timestamp(query_id, max(all_ids))
                 logger.info(f"No fresh items found for query_id: {query_id}")
 
         except Exception as e:
-            logger.error(f"Error processing results for query_id {query_id}: {e}")
+            logger.error(f"Error processing results for query_id {query_id}: {e}", exc_info=True)
             continue
 
 
@@ -241,12 +240,14 @@ def clear_item_queue(items_queue, new_items_queue):
                 if db.is_item_in_db_by_id(item.id) is True:
                     continue
 
-                # Check country allowlist
+                # Check country allowlist safely
                 if db.get_allowlist() != 0:
-                    user_country = get_user_country(item.raw_data["user"]["id"])
-                    if user_country not in (db.get_allowlist() + ["XX"]):
-                        logger.debug(f"User country {user_country} not in allowlist, skipping item")
-                        continue
+                    user_data_obj = item.raw_data.get("productItem", item.raw_data).get("user") or item.raw_data.get("user")
+                    if user_data_obj and isinstance(user_data_obj, dict) and "id" in user_data_obj:
+                        user_country = get_user_country(user_data_obj["id"])
+                        if user_country not in (db.get_allowlist() + ["XX"]):
+                            logger.debug(f"User country {user_country} not in allowlist, skipping item")
+                            continue
 
                 # Create message and add to queue
                 # Optimization: Beautiful formatting

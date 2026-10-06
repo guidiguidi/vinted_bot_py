@@ -54,6 +54,7 @@ __MACOSX/
 
 # Databases
 *.db
+!vinted_notifications.db
 *.sqlite
 *.sqlite3
 

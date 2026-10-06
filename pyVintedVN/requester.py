@@ -86,15 +86,15 @@ class Requester:
         self.proxies: Optional[Union[dict, str]] = None  # Manual override
         self.current_proxy: Optional[dict] = None  # Sticky proxy currently bound
 
-        # Session warmup tracking
-        self._warmed_up = False
+        # Session warmup tracking per domain
+        self._warmed_locales = set()
 
         # Browser headers
         self.user_agent = self.DEFAULT_USER_AGENT
         self.HEADER = {
             "User-Agent": self.user_agent,
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
             "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"',
@@ -105,21 +105,23 @@ class Requester:
 
         self._init_session(rotate_proxy=False)
 
+    def _resolve_proxy(self) -> Optional[dict]:
+        """Dynamically resolve sticky proxy from manual setting or proxy list."""
+        if self.proxies:
+            if isinstance(self.proxies, str):
+                return proxies.convert_proxy_string_to_dict(self.proxies)
+            return self.proxies
+        new_p = proxies.get_random_proxy()
+        return proxies.convert_proxy_string_to_dict(new_p) if new_p else None
+
     def _init_session(self, rotate_proxy: bool = False) -> None:
         """
         Initialize or reset the underlying tls-client session, binding to a sticky proxy.
         """
-        if self.proxies:
-            if isinstance(self.proxies, str):
-                self.current_proxy = proxies.convert_proxy_string_to_dict(self.proxies)
-            else:
-                self.current_proxy = self.proxies
-        else:
-            if rotate_proxy or self.current_proxy is None:
-                new_p = proxies.get_random_proxy()
-                self.current_proxy = proxies.convert_proxy_string_to_dict(new_p) if new_p else None
-                if self.current_proxy:
-                    logger.info(f"[Requester] Bound to sticky proxy: {self.current_proxy}")
+        if rotate_proxy or self.current_proxy is None:
+            self.current_proxy = self._resolve_proxy()
+            if self.current_proxy:
+                logger.info(f"[Requester] Bound to sticky proxy: {self.current_proxy}")
 
         self.session = tls_client.Session(
             client_identifier=self.CLIENT_IDENTIFIER,
@@ -132,7 +134,7 @@ class Requester:
             self.session.proxies = {}
 
         self.session.headers.update(self.HEADER)
-        self._warmed_up = False
+        self._warmed_locales.clear()
 
     def set_locale(self, locale: str) -> None:
         """
@@ -145,11 +147,30 @@ class Requester:
         if self.debug:
             logger.debug(f"[Requester] Locale updated to {locale}")
 
-    def _get_warmup_headers(self) -> Dict[str, str]:
+    def _get_lang_for_domain(self, domain: str) -> str:
+        d = domain.lower()
+        if d.endswith(".fr"):
+            return "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7"
+        elif d.endswith(".de"):
+            return "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"
+        elif d.endswith(".pl"):
+            return "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7"
+        elif d.endswith(".it"):
+            return "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+        elif d.endswith(".be"):
+            return "fr-BE,nl-BE,fr;q=0.9,en-US;q=0.8,en;q=0.7"
+        elif d.endswith(".at"):
+            return "de-AT,de;q=0.9,en-US;q=0.8,en;q=0.7"
+        elif d.endswith(".co.uk"):
+            return "en-GB,en;q=0.9,en-US;q=0.8"
+        return "en-US,en;q=0.9"
+
+    def _get_warmup_headers(self, domain: Optional[str] = None) -> Dict[str, str]:
+        domain = domain or self.locale
         return {
             "User-Agent": self.user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Language": self._get_lang_for_domain(domain),
             "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"',
@@ -164,7 +185,7 @@ class Requester:
         headers = {
             "User-Agent": self.user_agent,
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Language": self._get_lang_for_domain(self.locale),
             "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"',
@@ -173,7 +194,6 @@ class Requester:
             "Sec-Fetch-Site": "same-origin",
             "Referer": referer or f"https://{self.locale}/catalog",
         }
-        # If token cookie is available, include Authorization Bearer header
         token = self.session.cookies.get("access_token_web")
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -183,7 +203,7 @@ class Requester:
         return {
             "User-Agent": self.user_agent,
             "Accept": "text/x-component",
-            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Language": self._get_lang_for_domain(self.locale),
             "RSC": "1",
             "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             "Sec-Ch-Ua-Mobile": "?0",
@@ -194,23 +214,33 @@ class Requester:
             "Referer": referer or f"https://{self.locale}/catalog",
         }
 
-    def set_cookies(self, force: bool = False) -> None:
+    def warmup_domain(self, domain: Optional[str] = None, force: bool = False) -> None:
         """
-        Execute session warmup GET request to Vinted homepage,
-        extracting and persisting session cookies (_vinted_fr_session, anon_id, Datadome tokens).
+        Execute session warmup GET request to Vinted domain homepage,
+        extracting and persisting domain session cookies.
         """
-        if self._warmed_up and not force:
+        domain = domain or self.locale
+        if not domain:
+            domain = "www.vinted.fr"
+
+        if domain in self._warmed_locales and not force:
             return
 
-        headers = self._get_warmup_headers()
+        headers = self._get_warmup_headers(domain)
+        auth_url = f"https://{domain}/"
         try:
-            resp = self.session.get(self.VINTED_AUTH_URL, headers=headers, allow_redirects=True, timeout_seconds=15)
+            resp = self.session.get(auth_url, headers=headers, allow_redirects=True, timeout_seconds=15)
+            self._warmed_locales.add(domain)
             cookie_names = list(self.session.cookies.keys())
-            if self.debug or True:
-                logger.info(f"[Requester] Session warmed up (HTTP {resp.status_code}), cookies: {cookie_names}")
-            self._warmed_up = True
+            logger.info(f"[Requester] Domain {domain} warmed up (HTTP {resp.status_code}), cookies: {cookie_names}")
         except Exception as e:
-            logger.warning(f"[Requester] Error during session warmup GET to {self.VINTED_AUTH_URL}: {e}")
+            logger.warning(f"[Requester] Error during session warmup GET to {auth_url}: {e}")
+
+    def set_cookies(self, force: bool = False) -> None:
+        """
+        Execute session warmup for current locale.
+        """
+        self.warmup_domain(self.locale, force=force)
 
     def _fetch_catalog_items(self, target_url: str, params: Optional[dict] = None) -> VintedResponse:
         """
@@ -273,12 +303,13 @@ class Requester:
         """
         Make a GET request with retry and automatic session re-auth logic.
         """
-        if not self._warmed_up:
-            self.set_cookies()
-
         parsed = urllib.parse.urlparse(url)
-        if parsed.netloc and parsed.netloc != self.locale:
-            self.set_locale(parsed.netloc)
+        netloc = parsed.netloc or self.locale
+        if netloc and netloc != self.locale:
+            self.set_locale(netloc)
+
+        if netloc not in self._warmed_locales:
+            self.warmup_domain(netloc)
 
         is_catalog_request = ("catalog/items" in url) or (parsed.path.rstrip("/") == "/catalog" and "users" not in url)
 
@@ -298,13 +329,13 @@ class Requester:
                 # Check for 401 or 403 (Cloudflare / Datadome block or expired session)
                 if response.status_code in (401, 403):
                     logger.warning(
-                        f"[Requester] Received HTTP {response.status_code} on attempt {tried}/{self.MAX_RETRIES}. "
+                        f"[Requester] Received HTTP {response.status_code} on attempt {tried}/{self.MAX_RETRIES} for {netloc}. "
                         f"Refreshing cookies and rotating session..."
                     )
                     if tried < self.MAX_RETRIES:
-                        # Reset session, rotate sticky proxy, and execute warmup GET
+                        # Reset session, rotate sticky proxy, and execute warmup GET for netloc
                         self._init_session(rotate_proxy=True)
-                        self.set_cookies(force=True)
+                        self.warmup_domain(netloc, force=True)
                         time.sleep(1)
                         continue
                     else:
