@@ -1,10 +1,12 @@
-import multiprocessing, time, core, os, db, configuration_values
+import multiprocessing
+import time
+import core
+import os
+import db
 from apscheduler.schedulers.background import BackgroundScheduler
 from logger import get_logger
-import asyncio
 import logging
 import signal
-from multiprocessing import Manager
 
 # Configure logging to handle Unicode characters
 logging.basicConfig(
@@ -24,6 +26,7 @@ def signal_handler(sig, frame):
 
 telegram_process = None
 scrape_process = None
+sniper_proc = None
 current_query_refresh_delay = None
 
 def initialize_database():
@@ -49,7 +52,7 @@ def scraper_process(items_queue):
     logger.info("Scrape process started")
     current_query_refresh_delay = int(db.get_parameter("query_refresh_delay"))
     logger.info(f"Using query refresh delay of {current_query_refresh_delay} seconds")
-    time_threshold = int(time.time()) - 180
+    int(time.time()) - 180
     scraper_scheduler = BackgroundScheduler()
     scraper_scheduler.add_job(
         core.process_items,  # Только 1 аргумент
@@ -61,7 +64,7 @@ def scraper_process(items_queue):
     scraper_scheduler.start()
     try:
         while not shutdown_event.is_set():
-            time_threshold = int(time.time()) - 180
+            int(time.time()) - 180
             time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
         scraper_scheduler.shutdown()
@@ -133,7 +136,7 @@ def check_refresh_delay(items_queue):
         logger.error(f"Error updating refresh delay: {e}", exc_info=True)
 
 def monitor_processes(items_queue, telegram_queue):
-    global telegram_process
+    global telegram_process, sniper_proc
     check_refresh_delay(items_queue)
     telegram_is_running = telegram_process is not None and telegram_process.is_alive()
     if not telegram_is_running and not shutdown_event.is_set():
@@ -146,6 +149,23 @@ def monitor_processes(items_queue, telegram_queue):
         time.sleep(1)
         logger.info(
             f"Telegram process status: {'Running' if telegram_process and telegram_process.is_alive() else 'Stopped'}")
+
+    # Monitor AntiGravity Sniper
+    sniper_should_run = db.get_parameter('sniper_enabled') == 'True'
+    sniper_is_running = sniper_proc is not None and sniper_proc.is_alive()
+    if sniper_should_run and not sniper_is_running and not shutdown_event.is_set():
+        logger.info("Starting AntiGravity Sniper process...")
+        try:
+            from sniper.main import sniper_entry
+            sniper_proc = multiprocessing.Process(target=sniper_entry, name="Sniper")
+            sniper_proc.start()
+        except Exception as e:
+            logger.error(f"Error starting sniper process: {e}")
+    elif not sniper_should_run and sniper_is_running:
+        logger.info("Stopping AntiGravity Sniper process...")
+        sniper_proc.terminate()
+        sniper_proc.join(timeout=2.0)
+        sniper_proc = None
 
 def plugin_checker():
     db.set_parameter('telegram_process_running', 'True')
@@ -183,6 +203,17 @@ if __name__ == "__main__":
                                                  args=(new_items_queue, telegram_queue,),
                                                  name="Dispatcher")
     dispatcher_process.start()
+
+    # --- AntiGravity Sniper ---
+    sniper_proc = None
+    if db.get_parameter('sniper_enabled') == 'True':
+        logger.info("Starting AntiGravity Sniper process...")
+        from sniper.main import sniper_entry
+        sniper_proc = multiprocessing.Process(target=sniper_entry, name="Sniper")
+        sniper_proc.start()
+    else:
+        logger.info("AntiGravity Sniper is disabled (sniper_enabled != True)")
+
     logger.info("Starting monitor scheduler...")
     monitor_scheduler = BackgroundScheduler()
     monitor_scheduler.add_job(monitor_processes, 'interval', seconds=10, args=[items_queue, telegram_queue],
@@ -193,6 +224,7 @@ if __name__ == "__main__":
     logger.info(f"Scraper: {'Alive' if scrape_process.is_alive() else 'Dead'}")
     logger.info(f"ItemExtractor: {'Alive' if item_extractor_process.is_alive() else 'Dead'}")
     logger.info(f"Dispatcher: {'Alive' if dispatcher_process.is_alive() else 'Dead'}")
+    logger.info(f"Sniper: {'Alive' if sniper_proc and sniper_proc.is_alive() else 'Disabled'}")
     try:
         while not shutdown_event.is_set():
             try:
@@ -208,7 +240,7 @@ if __name__ == "__main__":
         monitor_scheduler.shutdown()
         processes = [
             scrape_process, item_extractor_process, dispatcher_process,
-            telegram_process
+            telegram_process, sniper_proc
         ]
         for proc in processes:
             if proc and proc.is_alive():

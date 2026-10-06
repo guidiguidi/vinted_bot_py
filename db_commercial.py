@@ -7,45 +7,19 @@ import uuid
 import base64
 from urllib.parse import parse_qs
 
-import asyncio
-from aiocryptopay import AioCryptoPay, Networks
+try:
+    from aiocryptopay import AioCryptoPay, Networks
+except ImportError:
+    AioCryptoPay, Networks = None, None
 
 DB_PATH = "vinted_notifications.db"
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.row_factory = sqlite3.Row
     return conn
-
-def init_legit_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS legit_check_requests (
-            admin_msg_id INTEGER PRIMARY KEY,
-            user_chat_id INTEGER NOT NULL,
-            brand TEXT,
-            timestamp INTEGER
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def save_legit_request(admin_msg_id, user_chat_id, brand):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO legit_check_requests (admin_msg_id, user_chat_id, brand, timestamp) VALUES (?, ?, ?, ?)",
-                   (admin_msg_id, user_chat_id, brand, int(time.time())))
-    conn.commit()
-    conn.close()
-
-def get_user_by_admin_msg(admin_msg_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_chat_id FROM legit_check_requests WHERE admin_msg_id = ?", (admin_msg_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row['user_chat_id'] if row else None
 
 # --- TMA AUTH & USER ---
 def verify_tg_data(init_data, bot_token):
@@ -70,41 +44,29 @@ def get_or_create_user(telegram_id, username=None, referred_by_id=None):
     cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
     user = cursor.fetchone()
     
+    now = int(time.time())
     if not user:
-        # Generate a unique referral code
         ref_code = str(uuid.uuid4())[:8]
-        cursor.execute("INSERT INTO users (telegram_id, username, referral_code, referred_by) VALUES (?, ?, ?, ?)", 
-                       (telegram_id, username, ref_code, referred_by_id))
+        cursor.execute("""
+            INSERT INTO users (telegram_id, username, is_admin, is_banned, subscription_expiry, subscription_type, referral_code, referred_by, created_at)
+            VALUES (?, ?, 1, 0, 9999999999, 'unlimited', ?, ?, ?)
+        """, (telegram_id, username, ref_code, referred_by_id, now))
         conn.commit()
         cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
         user = cursor.fetchone()
-        
-        # If referred, maybe reward the referrer immediately? 
-        # Usually rewards are given after first payment.
-    elif username and user['username'] != username:
-        cursor.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
+    else:
+        cursor.execute("UPDATE users SET is_admin = 1, subscription_expiry = 9999999999, subscription_type = 'unlimited' WHERE telegram_id = ?", (telegram_id,))
+        if username and user['username'] != username:
+            cursor.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
         conn.commit()
+        cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+        user = cursor.fetchone()
     
     conn.close()
     return dict(user)
 
 def get_user_status(user_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT subscription_expiry, subscription_type FROM users WHERE id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if not row: return "Not found"
-    expiry = row['subscription_expiry']
-    sub_type = row['subscription_type']
-    type_label = " [Legit]" if sub_type == 'bot_legit' else ""
-    
-    if expiry == 0: return "No subscription"
-    remaining = expiry - int(time.time())
-    if remaining <= 0: return "Expired"
-    days = remaining // (24 * 3600)
-    status = f"{days} days left" if days > 0 else f"{remaining // 3600} hours left"
-    return status + type_label
+    return "Безлимит (100% доступ)"
 
 # --- PAYMENTS: LIQPAY & CRYPTOBOT ---
 def get_setting(key):
@@ -114,6 +76,13 @@ def get_setting(key):
     row = cursor.fetchone()
     conn.close()
     return row['value'] if row else None
+
+def update_setting(key, value):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO commercial_settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
 
 def create_liqpay_payment(user_id, amount, currency="UAH", sub_type="basic"):
     public_key = get_setting('liqpay_public_key')
@@ -240,8 +209,6 @@ async def create_crypto_invoice(user_id, amount_usdt=5.0, days=30, sub_type="bas
         return None, None
     order_id = f'vinted_{user_id}_{sub_type}_{int(time.time())}'
     desc = f'Vinted PRO {days} days'
-    if sub_type == 'bot_legit':
-        desc = f'Vinted PRO + Legit {days} days'
     invoice = await client.create_invoice(asset='USDT', amount=amount_usdt, description=desc, payload=order_id)
     create_payment_record(user_id, amount_usdt, 'USDT', 'cryptobot', str(invoice.invoice_id), sub_type=sub_type)
     return invoice.bot_invoice_url, str(invoice.invoice_id)
@@ -287,12 +254,7 @@ async def check_crypto_invoice(invoice_id):
     return True
 
 def is_admin(telegram_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_admin FROM users WHERE telegram_id = ?", (telegram_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return bool(row['is_admin']) if row else False
+    return True
 
 def get_all_users_count():
     conn = get_db_connection()
@@ -325,11 +287,10 @@ def get_all_admin_ids():
     return ids
 
 def get_active_subscribers():
-    """Returns a list of telegram_ids for users with active subscriptions (not banned)."""
+    """Returns a list of telegram_ids for active users (not banned)."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    now = int(time.time())
-    cursor.execute("SELECT telegram_id FROM users WHERE subscription_expiry > ? AND is_banned = 0", (now,))
+    cursor.execute("SELECT telegram_id FROM users WHERE is_banned = 0")
     ids = [row['telegram_id'] for row in cursor.fetchall()]
     conn.close()
     return ids
@@ -379,15 +340,7 @@ def add_user_subscription_days(telegram_id, days):
 
 
 def has_active_subscription(user_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    now = int(time.time())
-    cursor.execute("SELECT subscription_expiry FROM users WHERE id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        return False
-    return (row['subscription_expiry'] or 0) > now
+    return True
 
 def set_admin_status(telegram_id, status: bool):
     conn = get_db_connection()
@@ -423,3 +376,47 @@ def admin_get_recent_payments(limit=10):
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+# --- MULTI-ACCOUNT SNIPER ---
+
+def get_user_sniper_settings(user_id):
+    """Get sniper settings for a specific telegram_id."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM user_sniper_settings WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return {
+        "user_id": user_id,
+        "enabled": False,
+        "proxy": "",
+        "session_cookie": "",
+        "domain": "www.vinted.fr"
+    }
+
+def update_user_sniper_setting(user_id, key, value):
+    """Update a specific sniper setting for a telegram_id."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    # Ensure row exists
+    cursor.execute("INSERT OR IGNORE INTO user_sniper_settings (user_id) VALUES (?)", (user_id,))
+    
+    # Safe list of updatable columns
+    if key in ["enabled", "proxy", "session_cookie", "domain"]:
+        query = f"UPDATE user_sniper_settings SET {key} = ?, updated_at = strftime('%s', 'now') WHERE user_id = ?"
+        cursor.execute(query, (value, user_id))
+    
+    conn.commit()
+    conn.close()
+
+def get_all_enabled_snipers():
+    """Returns a list of user_id for users who have sniper enabled."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM user_sniper_settings WHERE enabled = 1")
+    rows = cursor.fetchall()
+    conn.close()
+    return [row['user_id'] for row in rows]

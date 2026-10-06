@@ -5,3 +5,5 @@ feedgen==1.0.0
 aiocryptopay==0.4.8
 python-dotenv==1.2.2
 lxml==6.0.2
+redis==5.2.1
+tls-client==1.0.1

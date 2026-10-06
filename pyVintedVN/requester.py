@@ -191,9 +191,9 @@ class Requester:
             self.session.get(self.VINTED_AUTH_URL, timeout=10)
             if self.debug:
                 logger.debug("Cookies set via GET!")
-        except Exception as e:
+        except Exception:
             if self.debug:
-                logger.error(f"There was an error fetching cookies for vinted", exc_info=True)
+                logger.error("There was an error fetching cookies for vinted", exc_info=True)
 
 
     def update_cookies(self, cookies: dict):

@@ -3,7 +3,6 @@ import requests
 import time
 import os
 import csv
-from requests.exceptions import RequestException
 import configuration_values
 import concurrent.futures
 from datetime import datetime
@@ -187,8 +186,8 @@ def get_random_proxy() -> Optional[str]:
     # Check if PROXY_LIST is configured in the database
     proxy_list = db.get_parameter("proxy_list")
     if proxy_list:
-        # If PROXY_LIST is a string with multiple proxies separated by semicolons
-        all_proxies = [p.strip() for p in proxy_list.split(';') if p.strip()]
+        # If PROXY_LIST is a string with multiple proxies separated by semicolons or newlines
+        all_proxies = [p.strip() for p in proxy_list.replace('\r', '').replace('\n', ';').split(';') if p.strip()]
 
     # Check if PROXY_LIST_LINK is configured in the database
     proxy_list_link = db.get_parameter("proxy_list_link")
@@ -260,7 +259,7 @@ def check_proxy(proxy: str) -> bool:
         # We accept 200 (Success), 403 (Vinted block but proxy works), 
         # or 401 (Auth error from Vinted, but proxy works)
         return response.status_code in [200, 403, 401]
-    except Exception as e:
+    except Exception:
         # Any exception means the proxy is not working
         return False
     finally:
@@ -521,3 +520,101 @@ def get_dataimpulse_usage_status() -> dict:
         "period_end": end_date,
         "tz": tz,
     }
+
+
+def get_proxies_list() -> List[str]:
+    """
+    Get the list of configured scraper proxies from the database.
+    """
+    import db
+    proxy_list = db.get_parameter("proxy_list") or ""
+    return [p.strip() for p in proxy_list.replace('\r', '').replace('\n', ';').split(';') if p.strip()]
+
+
+def add_proxies(new_proxies: Any, check_immediately: bool = False) -> Tuple[int, int]:
+    """
+    Add one or multiple proxies to the database, avoiding duplicates.
+
+    Args:
+        new_proxies: A string (separated by newline or ';') or an iterable of proxy strings.
+        check_immediately: If True, verify proxy connectivity before adding.
+
+    Returns:
+        Tuple[int, int]: (added_count, total_count)
+    """
+    import db
+
+    candidates = []
+    if isinstance(new_proxies, str):
+        raw = new_proxies.replace('\r', '')
+        for line in raw.split('\n'):
+            for item in line.split(';'):
+                p = item.strip()
+                if p:
+                    candidates.append(p)
+    elif hasattr(new_proxies, '__iter__'):
+        for item in new_proxies:
+            if isinstance(item, str):
+                p = item.strip()
+                if p:
+                    candidates.append(p)
+
+    if not candidates:
+        current = get_proxies_list()
+        return 0, len(current)
+
+    current_proxies = get_proxies_list()
+    current_set = set(current_proxies)
+    added = []
+
+    for p in candidates:
+        if p not in current_set and p not in added:
+            if check_immediately:
+                if check_proxy(p):
+                    added.append(p)
+            else:
+                added.append(p)
+
+    if added:
+        updated = current_proxies + added
+        db.set_parameter("proxy_list", ";".join(updated))
+        reset_proxy_cache()
+        logger.info(f"Added {len(added)} new proxies. Total: {len(updated)}")
+        return len(added), len(updated)
+
+    return 0, len(current_proxies)
+
+
+def add_proxy(proxy: str, check_immediately: bool = False) -> bool:
+    """
+    Add a single proxy. Returns True if added, False otherwise.
+    """
+    added_count, _ = add_proxies(proxy, check_immediately=check_immediately)
+    return added_count > 0
+
+
+def remove_proxy(proxy: str) -> bool:
+    """
+    Remove a proxy from the database list.
+    """
+    import db
+    target = proxy.strip()
+    current = get_proxies_list()
+    if target in current:
+        current.remove(target)
+        db.set_parameter("proxy_list", ";".join(current))
+        reset_proxy_cache()
+        logger.info(f"Removed proxy: {target}")
+        return True
+    return False
+
+
+def clear_proxies() -> bool:
+    """
+    Clear all proxies in database.
+    """
+    import db
+    db.set_parameter("proxy_list", "")
+    reset_proxy_cache()
+    logger.info("Cleared all proxies")
+    return True

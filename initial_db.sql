@@ -48,10 +48,11 @@ CREATE TABLE IF NOT EXISTS commercial_settings (
 -- Создание таблицы queries
 CREATE TABLE IF NOT EXISTS queries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    query TEXT NOT NULL UNIQUE,
+    query TEXT NOT NULL,
     last_item INTEGER,
     query_name TEXT,
-    user_id INTEGER
+    user_id INTEGER,
+    UNIQUE(query, user_id)
 );
 
 -- Создание таблицы items
@@ -82,8 +83,7 @@ CREATE TABLE IF NOT EXISTS parameters (
 -- Вставка начальных параметров
 INSERT OR IGNORE INTO parameters (key, value) VALUES
 ('telegram_enabled', 'True'),
-('telegram_token', '8594499479:AAFX9PgERSTzz0wHc3m8n_mUbqgidZ3CKzg'),
-('legit_check_token', '8594499479:AAFX9PgERSTzz0wHc3m8n_mUbqgidZ3CKzg'),
+('telegram_token', ''),
 ('items_per_query', '20'),
 ('query_refresh_delay', '60'),
 ('check_proxies', 'False'),
@@ -105,9 +105,44 @@ INSERT OR IGNORE INTO commercial_settings (key, value) VALUES
 ('referral_reward_days', '5'),
 ('crypto_token', '');
 
+-- Параметры AntiGravity Sniper
+INSERT OR IGNORE INTO parameters (key, value) VALUES
+('sniper_enabled', 'False'),
+('sniper_proxy', ''),
+('sniper_session_cookie', ''),
+('sniper_vinted_domain', 'www.vinted.fr'),
+('sniper_user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+
+-- Таблица логов снайпера
+CREATE TABLE IF NOT EXISTS snipe_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT NOT NULL,
+    item_title TEXT,
+    price REAL,
+    currency TEXT,
+    status TEXT,
+    latency_ms REAL,
+    checkout_url TEXT,
+    target_user_id INTEGER,
+    error_detail TEXT,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+);
+
+-- Таблица настроек снайпера для пользователей (Multi-Account)
+CREATE TABLE IF NOT EXISTS user_sniper_settings (
+    user_id INTEGER PRIMARY KEY, -- Telegram ID
+    enabled BOOLEAN DEFAULT 0,
+    proxy TEXT,
+    session_cookie TEXT,
+    domain TEXT DEFAULT 'www.vinted.fr',
+    updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+);
+
 -- Создание индексов для улучшения производительности
 CREATE INDEX IF NOT EXISTS idx_items_timestamp ON items(timestamp);
 CREATE INDEX IF NOT EXISTS idx_items_query_id ON items(query_id);
 CREATE INDEX IF NOT EXISTS idx_queries_query ON queries(query);
 CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
 CREATE INDEX IF NOT EXISTS idx_keys_key ON subscription_keys(key);
+CREATE INDEX IF NOT EXISTS idx_snipe_log_item ON snipe_log(item_id);
+CREATE INDEX IF NOT EXISTS idx_snipe_log_status ON snipe_log(status);

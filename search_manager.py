@@ -1,5 +1,4 @@
 from logger import get_logger
-from urllib.parse import urlparse
 
 logger = get_logger(__name__)
 

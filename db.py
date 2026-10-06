@@ -1,12 +1,12 @@
 import sqlite3
 from traceback import print_exc
 import os
-import time
-import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 
 def get_db_connection():
-    conn = sqlite3.connect("vinted_notifications.db")
+    conn = sqlite3.connect("vinted_notifications.db", timeout=30.0)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -22,7 +22,7 @@ def create_or_update_sqlite_db(db_path):
             cursor.executescript(sql_script)
         conn.commit()
         return True
-    except Exception as e:
+    except Exception:
         print_exc()
         return False
     finally:
@@ -32,7 +32,7 @@ def create_or_update_sqlite_db(db_path):
 def is_item_in_db_by_id(id):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT() FROM items WHERE item=?", (id,))
         if cursor.fetchone()[0]:
@@ -47,7 +47,7 @@ def is_item_in_db_by_id(id):
 def get_last_timestamp(query_id):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT last_item FROM queries WHERE id=?", (query_id,))
         result = cursor.fetchone()
@@ -64,7 +64,7 @@ def get_last_timestamp(query_id):
 def update_last_timestamp(query_id, timestamp):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE queries SET last_item=? WHERE id=?", (timestamp, query_id))
         conn.commit()
@@ -93,7 +93,7 @@ def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="E
 def get_queries(user_id=None):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         if user_id:
             cursor.execute("SELECT id, query, last_item, query_name FROM queries WHERE user_id=?", (user_id,))
@@ -109,7 +109,7 @@ def get_queries(user_id=None):
 def get_query_by_id(query_id):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT id, query, last_item, query_name, user_id FROM queries WHERE id=?", (query_id,))
         return cursor.fetchone()
@@ -119,12 +119,15 @@ def get_query_by_id(query_id):
         if conn:
             conn.close()
 
-def is_query_in_db(processed_query):
+def is_query_in_db(processed_query, user_id=None):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT() FROM queries WHERE query = ?", (processed_query,))
+        if user_id:
+            cursor.execute("SELECT COUNT() FROM queries WHERE query = ? AND user_id = ?", (processed_query, user_id))
+        else:
+            cursor.execute("SELECT COUNT() FROM queries WHERE query = ?", (processed_query,))
         if cursor.fetchone()[0]:
             return True
         return False
@@ -138,7 +141,7 @@ def is_query_in_db(processed_query):
 def add_query_to_db(query, name=None, user_id=None):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         if name:
             cursor.execute("INSERT INTO queries (query, last_item, query_name, user_id) VALUES (?, NULL, ?, ?)", (query, name, user_id))
@@ -154,7 +157,7 @@ def add_query_to_db(query, name=None, user_id=None):
 def update_query_name(query_id, user_id, new_name):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE queries SET query_name=? WHERE id=? AND user_id=?", (new_name, query_id, user_id))
         conn.commit()
@@ -169,7 +172,7 @@ def update_query_name(query_id, user_id, new_name):
 def remove_query_by_id(query_id, user_id=None):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         if user_id:
             cursor.execute("SELECT id FROM queries WHERE id=? AND user_id=?", (query_id, user_id))
@@ -192,7 +195,7 @@ def remove_query_by_id(query_id, user_id=None):
 def remove_query_from_db(query_number):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         query_string = f"SELECT id, query, rowid FROM (SELECT id, query, rowid, ROW_NUMBER() OVER (ORDER BY ROWID) rn FROM queries) t WHERE rn={query_number}"
         cursor.execute(query_string)
@@ -211,7 +214,7 @@ def remove_query_from_db(query_number):
 def remove_all_queries_from_db():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM items")
         cursor.execute("DELETE FROM queries")
@@ -225,7 +228,7 @@ def remove_all_queries_from_db():
 def clear_items_only():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM items")
         conn.commit()
@@ -238,7 +241,7 @@ def clear_items_only():
 def add_to_allowlist(country):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("INSERT INTO allowlist VALUES (?)", (country,))
         conn.commit()
@@ -251,7 +254,7 @@ def add_to_allowlist(country):
 def remove_from_allowlist(country):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM allowlist WHERE country=?", (country,))
         conn.commit()
@@ -264,7 +267,7 @@ def remove_from_allowlist(country):
 def get_allowlist():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM allowlist")
         countries = [country[0] for country in cursor.fetchall()]
@@ -278,7 +281,7 @@ def get_allowlist():
 def clear_allowlist():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM allowlist")
         conn.commit()
@@ -291,7 +294,7 @@ def clear_allowlist():
 def get_parameter(key):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM parameters WHERE key=?", (key,))
         result = cursor.fetchone()
@@ -305,7 +308,7 @@ def get_parameter(key):
 def set_parameter(key, value):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO parameters (key, value) VALUES (?, ?) "
@@ -322,7 +325,7 @@ def set_parameter(key, value):
 def get_all_parameters():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT key, value FROM parameters")
         return {row[0]: row[1] for row in cursor.fetchall()}
@@ -336,7 +339,7 @@ def get_all_parameters():
 def get_items(limit=50, query=None, user_id=None):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         if query:
             if user_id:
@@ -371,7 +374,7 @@ def get_items(limit=50, query=None, user_id=None):
 def get_total_items_count():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM items")
         return cursor.fetchone()[0]
@@ -385,7 +388,7 @@ def get_total_items_count():
 def get_total_queries_count():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM queries")
         return cursor.fetchone()[0]
@@ -399,7 +402,7 @@ def get_total_queries_count():
 def get_last_found_item():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
             "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url FROM items i JOIN queries q ON i.query_id = q.id ORDER BY i.timestamp DESC LIMIT 1")
@@ -414,7 +417,7 @@ def get_last_found_item():
 def get_items_per_day():
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM items")
         total_items = cursor.fetchone()[0]
@@ -438,7 +441,7 @@ def get_items_per_day():
 def remove_all_user_queries_from_db(user_id):
     conn = None
     try:
-        conn = sqlite3.connect("vinted_notifications.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM items WHERE query_id IN (SELECT id FROM queries WHERE user_id=?)", (user_id,))
         cursor.execute("DELETE FROM queries WHERE user_id=?", (user_id,))

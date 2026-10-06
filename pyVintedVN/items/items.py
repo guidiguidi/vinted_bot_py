@@ -94,7 +94,7 @@ class Items:
                     snippet = response.text[:200]
                     logger.error(f"Response snippet: {snippet}")
                 except Exception:
-                    logger.error(f"Could not decode response content for logging")
+                    logger.error("Could not decode response content for logging")
                 raise e
 
             # Return either Item objects or raw JSON data

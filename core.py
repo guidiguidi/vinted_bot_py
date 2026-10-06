@@ -1,11 +1,10 @@
-import db, configuration_values, requests
+import db
+import requests
 from pyVintedVN import Vinted, requester
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from logger import get_logger
 import time
 from datetime import datetime
-import random
-from configuration_values import USER_AGENTS, DEFAULT_HEADERS
 from search_manager import SearchManager
 
 # Get logger for this module
@@ -42,11 +41,11 @@ def process_query(query, name=None, user_id=None):
     processed_query = urlunparse(
         (parsed_url.scheme, parsed_url.netloc, parsed_url.path, parsed_url.params, new_query, parsed_url.fragment))
 
-    if db.is_query_in_db(processed_query) is True:
-        return "Query already exists.", False
+    if db.is_query_in_db(processed_query, user_id=user_id) is True:
+        return "⚠️ Этот запрос уже добавлен в ваш список.", False
     else:
         db.add_query_to_db(processed_query, name, user_id)
-        return "Query added.", True
+        return "✅ Запрос успешно добавлен!", True
 
 
 def get_formatted_query_list(user_id=None):
@@ -113,6 +112,28 @@ def process_remove_country(country):
     return "Country removed.", db.get_allowlist()
 
 
+def process_add_proxy(proxy_input: str, check_immediately: bool = False):
+    """Process adding proxies from text input."""
+    import proxies
+    try:
+        added, total = proxies.add_proxies(proxy_input, check_immediately=check_immediately)
+        if added > 0:
+            return f"✅ Успешно добавлено {added} прокси. Всего в списке: <b>{total}</b>.", True
+        elif total > 0:
+            return f"ℹ️ Все указанные прокси уже есть в списке (всего: <b>{total}</b>).", False
+        else:
+            return "❌ Не удалось распознать прокси. Проверьте формат ввода.", False
+    except Exception as e:
+        logger.error(f"Error adding proxies: {e}", exc_info=True)
+        return f"❌ Ошибка при добавлении прокси: {e}", False
+
+
+def process_get_proxies():
+    """Get formatted list of current scraper proxies."""
+    import proxies
+    return proxies.get_proxies_list()
+
+
 def get_user_country(profile_id):
     """Get the country code for a Vinted user."""
     url = f"https://www.vinted.fr/api/v2/users/{profile_id}?localize=false"
@@ -171,7 +192,7 @@ def process_items(queue):
             # Filter to only include items with ID > last_item_id
             # AND published within the last 1 minute (60 seconds)
             current_time = int(time.time())
-            MAX_AGE = 60 # 1 minute
+            MAX_AGE = 600 # 10 minutes (prevents dropping items during longer scrape cycles)
             
             new_items = [
                 item for item in all_items 
@@ -233,7 +254,7 @@ def clear_item_queue(items_queue, new_items_queue):
 
                 # Get query name and user_id
                 query_info = db.get_query_by_id(query_id)
-                query_name = query_info[3] if query_info and query_info[3] else "Vinted"
+                query_info[3] if query_info and query_info[3] else "Vinted"
                 target_user_id = query_info[4] if query_info and len(query_info) > 4 else None
 
                 content = (
@@ -246,6 +267,24 @@ def clear_item_queue(items_queue, new_items_queue):
 
                 # photo is handled by telegram_bot if needed, but here we just pass it
                 new_items_queue.put((content, item.url, "🔎 Открыть", item.photo, item.buy_url, target_user_id))
+
+                # Publish to Redis for AntiGravity Sniper (non-blocking)
+                try:
+                    from sniper.redis_bus import publish_snipe_trigger_sync
+                    publish_snipe_trigger_sync({
+                        "item_id": item.id,
+                        "price": str(item.price),
+                        "currency": item.currency,
+                        "title": item.title,
+                        "url": item.url,
+                        "photo_url": item.photo,
+                        "target_user_id": target_user_id,
+                        "query_id": query_id,
+                        "ts_found": time.time(),
+                    })
+                except Exception as e:
+                    logger.debug(f"Redis snipe publish skipped: {e}")
+
                 # Add item to database
                 db.add_item_to_db(
                     id=item.id,
