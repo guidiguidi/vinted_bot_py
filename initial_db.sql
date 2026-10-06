@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER UNIQUE,
     username TEXT,
-    is_admin BOOLEAN DEFAULT 0,
+    is_admin BOOLEAN DEFAULT 1,
     is_banned BOOLEAN DEFAULT 0,
     created_at INTEGER
 );

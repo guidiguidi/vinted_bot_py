@@ -48,12 +48,17 @@ def get_or_create_user(telegram_id, username=None, referred_by_id=None):
     if not user:
         cursor.execute("""
             INSERT INTO users (telegram_id, username, is_admin, is_banned, created_at)
-            VALUES (?, ?, 0, 0, ?)
+            VALUES (?, ?, 1, 0, ?)
         """, (telegram_id, username, now))
         conn.commit()
         cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
         user = cursor.fetchone()
     else:
+        if not user['is_admin']:
+            cursor.execute("UPDATE users SET is_admin = 1 WHERE telegram_id = ?", (telegram_id,))
+            conn.commit()
+            cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+            user = cursor.fetchone()
         if username and user['username'] != username:
             cursor.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
             conn.commit()
@@ -73,19 +78,7 @@ def has_active_subscription(user_id):
 
 
 def is_admin(telegram_id):
-    admin_env = os.getenv("ADMIN_ID", "")
-    admin_ids = [int(i.strip()) for i in admin_env.split(",") if i.strip().isdigit()]
-    if telegram_id in admin_ids or telegram_id in (525127130, 913862074):
-        return True
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT is_admin FROM users WHERE telegram_id = ?", (telegram_id,))
-        row = cursor.fetchone()
-        conn.close()
-        return bool(row['is_admin']) if row else False
-    except Exception:
-        return False
+    return True
 
 
 def set_admin_status(telegram_id, status: bool):

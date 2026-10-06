@@ -53,6 +53,7 @@ MAIN_MENU_TEXTS = {
     "🌐 Прокси",
     "⚙️ Настройки",
     "📊 Статус",
+    "🛠 Админ-панель",
 }
 
 def main_menu_kb(chat_id: int = None) -> ReplyKeyboardMarkup:
@@ -60,6 +61,7 @@ def main_menu_kb(chat_id: int = None) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="➕ Добавить запрос"), KeyboardButton(text="📄 Мои запросы")],
         [KeyboardButton(text="🎯 Снайпер"), KeyboardButton(text="🌐 Прокси")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📊 Статус")],
+        [KeyboardButton(text="🛠 Админ-панель")],
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -592,6 +594,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(status_msg, reply_markup=main_menu_kb(chat_id), parse_mode='HTML')
 
+    elif text == "🛠 Админ-панель":
+        await update.message.reply_text("🛠 <b>Панель администратора</b>", reply_markup=admin_hub_kb(), parse_mode='HTML')
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -601,15 +606,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- ПРОВЕРКА БАНА ---
     if db_tma.is_user_banned(chat_id):
         await query.answer("Вы забанены.", show_alert=True)
-        return
-
-    admin_actions = (
-        data.startswith("adm_")
-        or data.startswith("edt_")
-        or data in ("set_scraper", "set_proxies", "admin_main")
-    )
-    if admin_actions and not db_tma.is_admin(chat_id):
-        await query.answer("Недостаточно прав.", show_alert=True)
         return
 
     await query.answer()
@@ -949,10 +945,11 @@ def run_bot_in_process(queue: multiprocessing.Queue):
     signal.signal(signal.SIGINT, signal_handler); signal.signal(signal.SIGTERM, signal_handler)
     application = Application.builder().token(token).build()
 
+    async def admin_cmd(u, c):
+        await u.message.reply_text("🛠 <b>Панель администратора</b>", reply_markup=admin_hub_kb(), parse_mode='HTML')
+
     async def add_proxy_cmd(u, c):
         cid = u.effective_chat.id
-        if not db_tma.is_admin(cid):
-            return
         if c.args:
             raw_input = " ".join(c.args)
             msg, _ = core.process_add_proxy(raw_input)
@@ -965,6 +962,7 @@ def run_bot_in_process(queue: multiprocessing.Queue):
             )
 
     application.add_handler(CommandHandler("start", lambda u, c: start(u, c, set())))
+    application.add_handler(CommandHandler("admin", admin_cmd))
     application.add_handler(CommandHandler("addproxy", add_proxy_cmd))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(callback_handler))
