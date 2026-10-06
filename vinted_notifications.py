@@ -160,7 +160,7 @@ def dispatcher_worker(in_q, out_q):
     while not shutdown_event.is_set():
         try:
             item = in_q.get(timeout=1.0)
-            logger.info(f"🚚 Dispatcher got item for user {item[5]}: {item[0][:50]}...")
+            logger.info(f"🚚 Dispatcher got item for user(s) {item[5]}: {item[0][:50]}...")
             out_q.put(item)
             logger.info(f"📨 Sent to telegram_queue, size: {out_q.qsize()}")
         except queue.Empty:

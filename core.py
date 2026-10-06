@@ -223,21 +223,27 @@ def process_items(queue):
 
 
 def clear_item_queue(items_queue, new_items_queue):
-    """Process items from the items_queue."""
+    """Process items from the items_queue with per-user deduplication."""
     while not items_queue.empty():
         try:
             data, query_id = items_queue.get_nowait()
         except Exception:
             break
 
+        # Resolve all subscribed users for this query
+        subscribers = db.get_subscribers_for_query(query_id)
+        if not subscribers:
+            import db_commercial as db_tma
+            subscribers = db_tma.get_active_subscribers()
+
         # Sort data by ID descending to process newest first
-        sorted_items = sorted(data, key=lambda x: int(x.id), reverse=True)
+        sorted_items = sorted(data, key=lambda x: int(x.id) if str(getattr(x, 'id', '')).isdigit() else 0, reverse=True)
 
         for item in sorted_items:
             try:
-                # We already filtered by ID in process_items, but we keep some checks
-                # Check if item already exists in db by ID (for cross-query duplicates)
-                if db.is_item_in_db_by_id(item.id) is True:
+                # Per-user deduplication: only include subscribers who have NOT seen this item yet
+                unseen_users = [uid for uid in subscribers if not db.is_item_seen_by_user(item.id, uid)]
+                if not unseen_users:
                     continue
 
                 # Check country allowlist safely
@@ -250,13 +256,7 @@ def clear_item_queue(items_queue, new_items_queue):
                             continue
 
                 # Create message and add to queue
-                # Optimization: Beautiful formatting
                 sub_type = item.raw_data.get('status', 'N/A')
-
-                # Get query name and user_id
-                query_info = db.get_query_by_id(query_id)
-                query_info[3] if query_info and query_info[3] else "Vinted"
-                target_user_id = query_info[4] if query_info and len(query_info) > 4 else None
 
                 content = (
                     f"✨ <b>{item.title}</b>\n\n"
@@ -266,10 +266,14 @@ def clear_item_queue(items_queue, new_items_queue):
                     f"🔄 <b>Состояние:</b> {sub_type}\n"
                 )
 
-                # photo is handled by telegram_bot if needed, but here we just pass it
-                new_items_queue.put((content, item.url, "🔎 Открыть", item.photo, item.buy_url, target_user_id))
+                # Mark item as seen for all unseen_users immediately to prevent re-queueing
+                for uid in unseen_users:
+                    db.mark_item_seen_by_user(item.id, uid)
 
-                # Add item to database
+                # Send item to queue with list of recipient user IDs
+                new_items_queue.put((content, item.url, "🔎 Открыть", item.photo, item.buy_url, unseen_users))
+
+                # Add item to database items table
                 db.add_item_to_db(
                     id=item.id,
                     timestamp=item.raw_timestamp,
@@ -285,10 +289,10 @@ def clear_item_queue(items_queue, new_items_queue):
                 time_diff = int(time.time()) - item.raw_timestamp
 
                 try:
-                    logger.info(f"✅ NEW ({time_diff}s ago): {item.title} | {item_time}")
+                    logger.info(f"✅ NEW ({time_diff}s ago) for {len(unseen_users)} user(s): {item.title} | {item_time}")
                 except UnicodeEncodeError:
                     safe_title = item.title.encode('ascii', 'ignore').decode('ascii')
-                    logger.info(f"✅ NEW ({time_diff}s ago): {safe_title} | {item_time}")
+                    logger.info(f"✅ NEW ({time_diff}s ago) for {len(unseen_users)} user(s): {safe_title} | {item_time}")
 
             except Exception as e:
                 logger.error(f"Error processing item {item.id}: {str(e)}")

@@ -32,6 +32,16 @@ CREATE TABLE IF NOT EXISTS items (
     UNIQUE(item, query_id)
 );
 
+-- Таблица отслеживания доставленных товаров пользователям (дедупликация per user)
+CREATE TABLE IF NOT EXISTS user_items (
+    user_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    seen_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_items_user ON user_items(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_items_item ON user_items(item_id);
+
 -- Создание таблицы allowlist
 CREATE TABLE IF NOT EXISTS allowlist (
     country TEXT PRIMARY KEY

@@ -6,7 +6,7 @@ import signal
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from logger import get_logger
 import db
 import core
@@ -709,45 +709,54 @@ async def notify_new_items(queue, bot, chat_ids):
     while not shutdown_event.is_set():
         try:
             if not queue.empty():
-                content, url, btn_text, photo_url, buy_url, target_user_id = queue.get()
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Открыть на Vinted", url=url)] + ([InlineKeyboardButton("⚡️ Быстрая покупка", url=buy_url)] if buy_url else [])])
+                item_data = queue.get()
+                content, url, btn_text, photo_url, buy_url, target_users = item_data[:6]
                 
-                if target_user_id:
-                    # Send to the user who owns the query
-                    try:
-                        if not db_tma.is_user_banned(target_user_id):
-                            sent = False
-                            if photo_url:
-                                try:
-                                    await bot.send_photo(chat_id=target_user_id, photo=photo_url, caption=content, reply_markup=kb, parse_mode='HTML')
-                                    sent = True
-                                except Exception as pe:
-                                    logger.warning(f"Failed to send photo to {target_user_id} ({pe}), falling back to text message")
-                            if not sent:
-                                await bot.send_message(chat_id=target_user_id, text=content, reply_markup=kb, parse_mode='HTML')
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        logger.error(f"Error sending item notification to {target_user_id}: {e}")
+                # Normalize target_users into a list of user IDs
+                if isinstance(target_users, (int, str)):
+                    recipients = [int(target_users)]
+                elif isinstance(target_users, (list, tuple, set)):
+                    recipients = [int(u) for u in target_users if u]
                 else:
-                    # Fallback: send to all registered users
-                    active_ids = db_tma.get_active_subscribers()
-                    for cid in active_ids:
-                        try:
-                            sent = False
-                            if photo_url:
-                                try:
-                                    await bot.send_photo(chat_id=cid, photo=photo_url, caption=content, reply_markup=kb, parse_mode='HTML')
-                                    sent = True
-                                except Exception as pe:
-                                    logger.warning(f"Failed to send photo to {cid} ({pe}), falling back to text message")
-                            if not sent:
-                                await bot.send_message(chat_id=cid, text=content, reply_markup=kb, parse_mode='HTML')
-                            await asyncio.sleep(0.05)
-                        except Exception as e:
-                            logger.error(f"Error broadcasting item to {cid}: {e}")
+                    recipients = db_tma.get_active_subscribers()
+
+                if not recipients:
+                    recipients = db_tma.get_active_subscribers()
+
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔎 Открыть на Vinted", url=url)] + ([InlineKeyboardButton("⚡️ Быстрая покупка", url=buy_url)] if buy_url else [])])
+
+                for uid in recipients:
+                    try:
+                        if db_tma.is_user_banned(uid):
+                            logger.info(f"User {uid} is banned, skipping notification")
+                            continue
+
+                        sent = False
+                        if photo_url:
+                            try:
+                                await bot.send_photo(chat_id=uid, photo=photo_url, caption=content, reply_markup=kb, parse_mode='HTML')
+                                sent = True
+                            except Exception as pe:
+                                logger.warning(f"Failed to send photo to user {uid} ({pe}), falling back to text message")
+                        
+                        if not sent:
+                            await bot.send_message(chat_id=uid, text=content, reply_markup=kb, parse_mode='HTML')
+
+                        logger.info(f"✅ Notification delivered to user {uid}")
+                        await asyncio.sleep(0.05)
+                    except Forbidden as fe:
+                        logger.warning(f"Telegram Forbidden for user {uid} (bot blocked/deactivated): {fe}")
+                    except BadRequest as be:
+                        logger.warning(f"Telegram BadRequest for user {uid} (chat not found / invalid chat_id): {be}")
+                    except RetryAfter as re:
+                        logger.warning(f"Telegram Rate Limit for user {uid}: sleeping {re.retry_after}s")
+                        await asyncio.sleep(re.retry_after)
+                    except Exception as ue:
+                        logger.error(f"Error sending item notification to user {uid}: {ue}", exc_info=True)
+
             await asyncio.sleep(0.1)
         except Exception as e:
-            logger.error(f"Error in notify_new_items: {e}")
+            logger.error(f"Error in notify_new_items loop: {e}", exc_info=True)
             await asyncio.sleep(1)
 
 def signal_handler(sig, frame):

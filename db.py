@@ -33,6 +33,27 @@ def _init_db_if_needed(conn):
                     with open(SQL_INIT_PATH, "r", encoding="utf-8") as f:
                         conn.executescript(f.read())
                     conn.commit()
+
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_items'")
+            if not cursor.fetchone():
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_items (
+                        user_id INTEGER NOT NULL,
+                        item_id TEXT NOT NULL,
+                        seen_at INTEGER NOT NULL,
+                        PRIMARY KEY (user_id, item_id)
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_items_user ON user_items(user_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_items_item ON user_items(item_id)")
+                cursor.execute("""
+                    INSERT OR IGNORE INTO user_items (user_id, item_id, seen_at)
+                    SELECT q.user_id, i.item, i.timestamp
+                    FROM items i
+                    JOIN queries q ON i.query_id = q.id
+                    WHERE q.user_id IS NOT NULL
+                """)
+                conn.commit()
     except Exception:
         print_exc()
 
@@ -63,17 +84,101 @@ def create_or_update_sqlite_db(db_path):
         if conn:
             conn.close()
 
-def is_item_in_db_by_id(id):
+def is_item_in_db_by_id(id, query_id=None):
     conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT() FROM items WHERE item=?", (id,))
+        if query_id is not None:
+            cursor.execute("SELECT COUNT() FROM items WHERE item=? AND query_id=?", (id, query_id))
+        else:
+            cursor.execute("SELECT COUNT() FROM items WHERE item=?", (id,))
         if cursor.fetchone()[0]:
             return True
         return False
     except Exception:
         print_exc()
+    finally:
+        if conn:
+            conn.close()
+
+def is_item_seen_by_user(item_id, user_id):
+    """Check if a specific item has already been sent to this user."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM user_items WHERE user_id = ? AND item_id = ?", (user_id, str(item_id)))
+        return cursor.fetchone() is not None
+    except Exception:
+        print_exc()
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+def mark_item_seen_by_user(item_id, user_id):
+    """Mark an item as seen/delivered for a specific user."""
+    conn = None
+    try:
+        import time
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = int(time.time())
+        cursor.execute(
+            "INSERT OR IGNORE INTO user_items (user_id, item_id, seen_at) VALUES (?, ?, ?)",
+            (user_id, str(item_id), now)
+        )
+        conn.commit()
+    except Exception:
+        print_exc()
+    finally:
+        if conn:
+            conn.close()
+
+def get_subscribers_for_query(query_id):
+    """
+    Returns a list of telegram_ids who should receive items from this query.
+    - Owner of this query
+    - All users who have added this identical query URL
+    - If the query belongs to admin or has no user_id, all active users
+    """
+    conn = None
+    try:
+        import db_commercial as db_tma
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT query, user_id FROM queries WHERE id = ?", (query_id,))
+        row = cursor.fetchone()
+        if not row:
+            return db_tma.get_active_subscribers()
+
+        query_url, owner_id = row[0], row[1]
+        subscribers = set()
+        if owner_id:
+            subscribers.add(owner_id)
+
+        # Check all users who have this identical query URL in their list
+        cursor.execute("SELECT DISTINCT user_id FROM queries WHERE query = ? AND user_id IS NOT NULL", (query_url,))
+        for r in cursor.fetchall():
+            subscribers.add(r[0])
+
+        try:
+            admin_id = int(os.getenv("ADMIN_ID", "525127130"))
+        except Exception:
+            admin_id = 525127130
+
+        # If the query is owned by admin or has no owner, it's a shared/system query -> send to all active subscribers
+        if owner_id is None or owner_id == admin_id:
+            all_active = db_tma.get_active_subscribers()
+            for uid in all_active:
+                subscribers.add(uid)
+
+        return list(subscribers)
+    except Exception:
+        print_exc()
+        import db_commercial as db_tma
+        return db_tma.get_active_subscribers()
     finally:
         if conn:
             conn.close()
