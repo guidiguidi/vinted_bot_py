@@ -224,8 +224,11 @@ def process_items(queue):
 
 def clear_item_queue(items_queue, new_items_queue):
     """Process items from the items_queue."""
-    if not items_queue.empty():
-        data, query_id = items_queue.get()
+    while not items_queue.empty():
+        try:
+            data, query_id = items_queue.get_nowait()
+        except Exception:
+            break
 
         # Sort data by ID descending to process newest first
         sorted_items = sorted(data, key=lambda x: int(x.id), reverse=True)

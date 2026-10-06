@@ -1,30 +1,44 @@
-import multiprocessing
+import threading
+import queue
 import time
-import core
 import os
-import db
-from dotenv import load_dotenv
-from apscheduler.schedulers.background import BackgroundScheduler
-from logger import get_logger
-import logging
 import signal
+import json
+import http.server
+import socketserver
+from dotenv import load_dotenv
+
+import core
+import db
+import db_commercial as db_tma
+import proxies
+from logger import configure_root_logger, get_logger
 
 load_dotenv()
-
-# Configure logging for console (stdout / Heroku) and file
-from logger import configure_root_logger, get_logger
 configure_root_logger()
 logger = get_logger(__name__)
 
-shutdown_event = multiprocessing.Event()
+shutdown_event = threading.Event()
+
+items_queue = queue.Queue()
+new_items_queue = queue.Queue()
+telegram_queue = queue.Queue()
+
+scraper_thread = None
+telegram_thread = None
+item_extractor_thread = None
+dispatcher_thread = None
+
 
 def signal_handler(sig, frame):
     logger.info("Received shutdown signal")
     shutdown_event.set()
+    try:
+        from telegram_bot_plugin.telegram_bot import stop_bot
+        stop_bot()
+    except Exception:
+        pass
 
-telegram_process = None
-scrape_process = None
-current_query_refresh_delay = None
 
 def start_health_server():
     """Starts a minimal HTTP server if PORT environment variable is set (Heroku web dyno support)."""
@@ -32,13 +46,6 @@ def start_health_server():
     if not port_str:
         return
     try:
-        import http.server
-        import socketserver
-        import threading
-        import json
-        import db_commercial as db_tma
-        import proxies
-
         port = int(port_str)
 
         class HealthHandler(http.server.BaseHTTPRequestHandler):
@@ -57,6 +64,17 @@ def start_health_server():
                             "users_count": users_cnt,
                             "proxies_count": len(proxies_list),
                             "server_time": int(time.time()),
+                            "threads": {
+                                "scraper": scraper_thread.is_alive() if scraper_thread else False,
+                                "telegram": telegram_thread.is_alive() if telegram_thread else False,
+                                "extractor": item_extractor_thread.is_alive() if item_extractor_thread else False,
+                                "dispatcher": dispatcher_thread.is_alive() if dispatcher_thread else False,
+                            },
+                            "queues": {
+                                "items": items_queue.qsize(),
+                                "new_items": new_items_queue.qsize(),
+                                "telegram": telegram_queue.qsize(),
+                            }
                         }
                         self.wfile.write((json.dumps(debug_data, indent=2) + "\n").encode("utf-8"))
                     except Exception as ex:
@@ -75,11 +93,12 @@ def start_health_server():
             allow_reuse_address = True
 
         httpd = ReusableTCPServer(("", port), HealthHandler)
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True, name="HealthServer")
         thread.start()
         logger.info(f"Health server listening on port {port}")
     except Exception as e:
         logger.error(f"Failed to start health server: {e}")
+
 
 def initialize_database():
     sql_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "initial_db.sql")
@@ -96,7 +115,6 @@ def initialize_database():
         logger.error(f"Error creating database: {e}")
         return False
 
-    # Automatically sync TELEGRAM_TOKEN from environment/.env to database if present
     token = os.getenv("TELEGRAM_TOKEN")
     if token:
         db.set_parameter("telegram_token", token)
@@ -104,180 +122,138 @@ def initialize_database():
 
     return True
 
-def scraper_process(items_queue):
-    logger.info("Scrape process started")
+
+def scraper_worker(q):
+    logger.info("Scraper worker thread started")
     from pyVintedVN.requester import requester
     requester._init_session(rotate_proxy=False)
-    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay") or 60)
-    logger.info(f"Using query refresh delay of {current_query_refresh_delay} seconds")
-    int(time.time()) - 180
-    scraper_scheduler = BackgroundScheduler()
-    scraper_scheduler.add_job(
-        core.process_items,  # Только 1 аргумент
-        'interval',
-        seconds=current_query_refresh_delay,
-        args=[items_queue],  # Только очередь, без time_threshold
-        name="scraper"
-    )
-    scraper_scheduler.start()
-    try:
-        while not shutdown_event.is_set():
-            int(time.time()) - 180
+
+    while not shutdown_event.is_set():
+        try:
+            core.process_items(q)
+        except Exception as e:
+            logger.error(f"Error during query scrape cycle: {e}", exc_info=True)
+
+        delay = int(db.get_parameter("query_refresh_delay") or 30)
+        for _ in range(delay):
+            if shutdown_event.is_set():
+                break
             time.sleep(1)
-    except (KeyboardInterrupt, SystemExit):
-        scraper_scheduler.shutdown()
-        logger.info("Scrape process stopped")
-    finally:
-        scraper_scheduler.shutdown()
-        logger.info("Scrape process fully terminated")
 
-def item_extractor(items_queue, new_items_queue):
-    logger.info("Item extractor process started")
-    try:
-        while not shutdown_event.is_set():
-            core.clear_item_queue(items_queue, new_items_queue)
+    logger.info("Scraper worker thread fully terminated")
+
+
+def item_extractor_worker(in_q, out_q):
+    logger.info("Item extractor thread started")
+    while not shutdown_event.is_set():
+        try:
+            core.clear_item_queue(in_q, out_q)
             time.sleep(0.1)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Item extractor process stopped")
-    finally:
-        logger.info("Item extractor process fully terminated")
+        except Exception as e:
+            logger.error(f"Error in item extractor: {e}", exc_info=True)
+            time.sleep(1)
+    logger.info("Item extractor thread fully terminated")
 
-def dispatcher_function(input_queue, telegram_queue):
-    logger.info("Dispatcher process started")
-    try:
-        while not shutdown_event.is_set():
-            try:
-                item = input_queue.get(timeout=1.0)
-                # item is (content, url, btn_text, photo_url, buy_url, target_user_id)
-                logger.info(f"🚚 Dispatcher got item for user {item[5]}: {item[0][:50]}...")
-                telegram_queue.put(item)
-                try:
-                    logger.info(f"📨 Sent to telegram_queue, size: {telegram_queue.qsize()}")
-                except NotImplementedError:
-                    logger.info("📨 Sent to telegram_queue, size: unavailable")
-            except multiprocessing.queues.Empty:
-                continue
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Dispatcher process stopped")
-    except Exception as e:
-        logger.error(f"Error in dispatcher: {e}")
-    finally:
-        logger.info("Dispatcher process fully terminated")
 
-def telegram_bot_process(queue):
-    logger.info("Starting Telegram bot process")
+def dispatcher_worker(in_q, out_q):
+    logger.info("Dispatcher thread started")
+    while not shutdown_event.is_set():
+        try:
+            item = in_q.get(timeout=1.0)
+            logger.info(f"🚚 Dispatcher got item for user {item[5]}: {item[0][:50]}...")
+            out_q.put(item)
+            logger.info(f"📨 Sent to telegram_queue, size: {out_q.qsize()}")
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logger.error(f"Error in dispatcher: {e}", exc_info=True)
+            time.sleep(1)
+    logger.info("Dispatcher thread fully terminated")
+
+
+def telegram_bot_worker(q):
+    logger.info("Starting Telegram bot thread")
     try:
         from telegram_bot_plugin.telegram_bot import run_bot_in_process
-        run_bot_in_process(queue)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Telegram bot process stopped")
+        run_bot_in_process(q)
     except Exception as e:
-        logger.error(f"Error in telegram bot process: {e}", exc_info=True)
-    finally:
-        logger.info("Telegram bot process fully terminated")
+        logger.error(f"Error in Telegram bot thread: {e}", exc_info=True)
+    logger.info("Telegram bot thread fully terminated")
 
-def check_refresh_delay(items_queue):
-    global scrape_process, current_query_refresh_delay
-    if scrape_process is None or not scrape_process.is_alive():
-        return
-    try:
-        new_delay = int(db.get_parameter("query_refresh_delay") or 60)
-        if new_delay != current_query_refresh_delay:
-            logger.info(f"Query refresh delay changed from {current_query_refresh_delay} to {new_delay} seconds")
-            current_query_refresh_delay = new_delay
-            scrape_process.terminate()
-            scrape_process.join()
-            scrape_process = multiprocessing.Process(target=scraper_process, args=(items_queue,))
-            scrape_process.start()
-            logger.info(f"Scheduler updated with new refresh delay of {new_delay} seconds")
-    except Exception as e:
-        logger.error(f"Error updating refresh delay: {e}", exc_info=True)
-
-def monitor_processes(items_queue, telegram_queue):
-    global telegram_process
-    check_refresh_delay(items_queue)
-    telegram_is_running = telegram_process is not None and telegram_process.is_alive()
-    if not telegram_is_running and not shutdown_event.is_set():
-        if telegram_process is not None:
-            telegram_process.join(timeout=2.0)
-            telegram_process = None
-        logger.info("Starting telegram bot process.")
-        telegram_process = multiprocessing.Process(target=telegram_bot_process, args=(telegram_queue,), name="TelegramBot")
-        telegram_process.start()
-        time.sleep(1)
-        logger.info(
-            f"Telegram process status: {'Running' if telegram_process and telegram_process.is_alive() else 'Stopped'}")
-
-def plugin_checker():
-    db.set_parameter('telegram_process_running', 'True')
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
     start_health_server()
+
     if not initialize_database():
         logger.error("Failed to initialize database. Exiting.")
         exit(1)
+
     db.set_parameter('sniper_enabled', 'False')
     db.set_parameter('telegram_enabled', 'True')
     db.set_parameter('telegram_process_running', 'True')
-    plugin_checker()
-    manager = multiprocessing.Manager()
-    items_queue = manager.Queue()
-    new_items_queue = manager.Queue()
-    telegram_queue = manager.Queue()
-    logger.info(f"Queues created. Telegram queue: {telegram_queue}")
-    logger.info("Starting Telegram process...")
-    telegram_process = multiprocessing.Process(target=telegram_bot_process, args=(telegram_queue,), name="TelegramBot")
-    telegram_process.start()
-    time.sleep(3)
-    telegram_status = "Running" if telegram_process and telegram_process.is_alive() else "Stopped"
-    logger.info(f"Telegram process status: {telegram_status}")
-    logger.info("Starting scrape process...")
-    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay") or 60)
-    scrape_process = multiprocessing.Process(target=scraper_process, args=(items_queue,), name="Scraper")
-    scrape_process.start()
-    logger.info("Starting item extractor process...")
-    item_extractor_process = multiprocessing.Process(target=item_extractor, args=(items_queue, new_items_queue),
-                                                     name="ItemExtractor")
-    item_extractor_process.start()
-    logger.info("Starting dispatcher process...")
-    dispatcher_process = multiprocessing.Process(target=dispatcher_function,
-                                                 args=(new_items_queue, telegram_queue,),
-                                                 name="Dispatcher")
-    dispatcher_process.start()
 
-    logger.info("Starting monitor scheduler...")
-    monitor_scheduler = BackgroundScheduler()
-    monitor_scheduler.add_job(monitor_processes, 'interval', seconds=10, args=[items_queue, telegram_queue],
-                              name="process_monitor")
-    monitor_scheduler.start()
+    logger.info("In-memory thread-safe queues created.")
+
+    # 1. Telegram bot thread
+    telegram_thread = threading.Thread(target=telegram_bot_worker, args=(telegram_queue,), name="TelegramBot", daemon=True)
+    telegram_thread.start()
+    time.sleep(1)
+
+    # 2. Item extractor thread
+    item_extractor_thread = threading.Thread(target=item_extractor_worker, args=(items_queue, new_items_queue), name="ItemExtractor", daemon=True)
+    item_extractor_thread.start()
+
+    # 3. Dispatcher thread
+    dispatcher_thread = threading.Thread(target=dispatcher_worker, args=(new_items_queue, telegram_queue), name="Dispatcher", daemon=True)
+    dispatcher_thread.start()
+
+    # 4. Scraper thread
+    scraper_thread = threading.Thread(target=scraper_worker, args=(items_queue,), name="Scraper", daemon=True)
+    scraper_thread.start()
+
     logger.info("=== PROCESS STATUS ===")
-    logger.info(f"Telegram: {'Alive' if telegram_process.is_alive() else 'Dead'}")
-    logger.info(f"Scraper: {'Alive' if scrape_process.is_alive() else 'Dead'}")
-    logger.info(f"ItemExtractor: {'Alive' if item_extractor_process.is_alive() else 'Dead'}")
-    logger.info(f"Dispatcher: {'Alive' if dispatcher_process.is_alive() else 'Dead'}")
+    logger.info(f"Telegram: {'Alive' if telegram_thread.is_alive() else 'Dead'}")
+    logger.info(f"Scraper: {'Alive' if scraper_thread.is_alive() else 'Dead'}")
+    logger.info(f"ItemExtractor: {'Alive' if item_extractor_thread.is_alive() else 'Dead'}")
+    logger.info(f"Dispatcher: {'Alive' if dispatcher_thread.is_alive() else 'Dead'}")
+
     try:
         while not shutdown_event.is_set():
-            try:
-                logger.info(
-                    f"Queue status - Items: {items_queue.qsize()}, New: {new_items_queue.qsize()}, Telegram: {telegram_queue.qsize()}")
-            except NotImplementedError:
-                logger.info("Queue status - Size information unavailable on this platform.")
+            logger.info(
+                f"Queue status - Items: {items_queue.qsize()}, New: {new_items_queue.qsize()}, Telegram: {telegram_queue.qsize()}"
+            )
+
+            # Health monitor
+            if not telegram_thread.is_alive() and not shutdown_event.is_set():
+                logger.warning("Telegram bot thread unexpectedly terminated. Restarting...")
+                telegram_thread = threading.Thread(target=telegram_bot_worker, args=(telegram_queue,), name="TelegramBot", daemon=True)
+                telegram_thread.start()
+
+            if not scraper_thread.is_alive() and not shutdown_event.is_set():
+                logger.warning("Scraper thread unexpectedly terminated. Restarting...")
+                scraper_thread = threading.Thread(target=scraper_worker, args=(items_queue,), name="Scraper", daemon=True)
+                scraper_thread.start()
+
             time.sleep(30)
+
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Main process interrupted")
+        logger.info("Main shutdown triggered")
         shutdown_event.set()
     finally:
-        monitor_scheduler.shutdown()
-        processes = [
-            scrape_process, item_extractor_process, dispatcher_process,
-            telegram_process
-        ]
-        for proc in processes:
-            if proc and proc.is_alive():
-                logger.info(f"Terminating {proc.name}...")
-                proc.terminate()
-                proc.join(timeout=5.0)
+        shutdown_event.set()
+        try:
+            from telegram_bot_plugin.telegram_bot import stop_bot
+            stop_bot()
+        except Exception:
+            pass
+
+        threads = [scraper_thread, item_extractor_thread, dispatcher_thread, telegram_thread]
+        for t in threads:
+            if t and t.is_alive():
+                t.join(timeout=2.0)
+
         db.set_parameter('telegram_process_running', 'False')
         logger.info("All processes terminated")

@@ -716,9 +716,14 @@ async def notify_new_items(queue, bot, chat_ids):
                     # Send to the user who owns the query
                     try:
                         if not db_tma.is_user_banned(target_user_id):
+                            sent = False
                             if photo_url:
-                                await bot.send_photo(chat_id=target_user_id, photo=photo_url, caption=content, reply_markup=kb, parse_mode='HTML')
-                            else:
+                                try:
+                                    await bot.send_photo(chat_id=target_user_id, photo=photo_url, caption=content, reply_markup=kb, parse_mode='HTML')
+                                    sent = True
+                                except Exception as pe:
+                                    logger.warning(f"Failed to send photo to {target_user_id} ({pe}), falling back to text message")
+                            if not sent:
                                 await bot.send_message(chat_id=target_user_id, text=content, reply_markup=kb, parse_mode='HTML')
                         await asyncio.sleep(0.05)
                     except Exception as e:
@@ -728,9 +733,14 @@ async def notify_new_items(queue, bot, chat_ids):
                     active_ids = db_tma.get_active_subscribers()
                     for cid in active_ids:
                         try:
+                            sent = False
                             if photo_url:
-                                await bot.send_photo(chat_id=cid, photo=photo_url, caption=content, reply_markup=kb, parse_mode='HTML')
-                            else:
+                                try:
+                                    await bot.send_photo(chat_id=cid, photo=photo_url, caption=content, reply_markup=kb, parse_mode='HTML')
+                                    sent = True
+                                except Exception as pe:
+                                    logger.warning(f"Failed to send photo to {cid} ({pe}), falling back to text message")
+                            if not sent:
                                 await bot.send_message(chat_id=cid, text=content, reply_markup=kb, parse_mode='HTML')
                             await asyncio.sleep(0.05)
                         except Exception as e:
@@ -740,16 +750,27 @@ async def notify_new_items(queue, bot, chat_ids):
             logger.error(f"Error in notify_new_items: {e}")
             await asyncio.sleep(1)
 
-def signal_handler(sig, frame): shutdown_event.set()
+def signal_handler(sig, frame):
+    shutdown_event.set()
 
-def run_bot_in_process(queue: multiprocessing.Queue):
+def stop_bot():
+    try:
+        shutdown_event.set()
+    except Exception:
+        pass
+
+def run_bot_in_process(queue):
     load_dotenv()
     token = os.getenv('TELEGRAM_TOKEN') or db.get_parameter('telegram_token')
     if not token:
         logger.error("TELEGRAM_TOKEN is not configured! Please set it in .env")
         return
     db.set_parameter('telegram_token', token)
-    signal.signal(signal.SIGINT, signal_handler); signal.signal(signal.SIGTERM, signal_handler)
+    try:
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+    except ValueError:
+        pass  # In thread, signals are caught by main thread
     application = Application.builder().token(token).build()
 
     async def admin_cmd(u, c):
@@ -785,3 +806,4 @@ def run_bot_in_process(queue: multiprocessing.Queue):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(main())
+

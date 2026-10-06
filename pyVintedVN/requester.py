@@ -6,6 +6,7 @@ import re
 import time
 import urllib.parse
 from typing import Optional, Dict, Any, Union
+import threading
 
 import tls_client
 from requests.exceptions import HTTPError, ProxyError, RequestException
@@ -104,6 +105,7 @@ class Requester:
         }
         self._session = None
         self._session_pid = None
+        self._lock = threading.Lock()
 
     @property
     def session(self) -> tls_client.Session:
@@ -316,68 +318,69 @@ class Requester:
         """
         Make a GET request with retry and automatic session re-auth logic.
         """
-        parsed = urllib.parse.urlparse(url)
-        netloc = parsed.netloc or self.locale
-        if netloc and netloc != self.locale:
-            self.set_locale(netloc)
+        with self._lock:
+            parsed = urllib.parse.urlparse(url)
+            netloc = parsed.netloc or self.locale
+            if netloc and netloc != self.locale:
+                self.set_locale(netloc)
 
-        if netloc not in self._warmed_locales:
-            self.warmup_domain(netloc)
+            if netloc not in self._warmed_locales:
+                self.warmup_domain(netloc)
 
-        is_catalog_request = ("catalog/items" in url) or (parsed.path.rstrip("/") == "/catalog" and "users" not in url)
+            is_catalog_request = ("catalog/items" in url) or (parsed.path.rstrip("/") == "/catalog" and "users" not in url)
 
-        tried = 0
-        direct_fallback_used = False
+            tried = 0
+            direct_fallback_used = False
 
-        while tried < self.MAX_RETRIES:
-            tried += 1
-            try:
-                if is_catalog_request:
-                    response = self._fetch_catalog_items(url, params)
-                else:
-                    headers = self._get_api_headers()
-                    raw = self.session.get(url, params=params, headers=headers, allow_redirects=True, timeout_seconds=15)
-                    response = VintedResponse(raw_resp=raw, url=url)
-
-                # Check for 401 or 403 (Cloudflare / Datadome block or expired session)
-                if response.status_code in (401, 403):
-                    logger.warning(
-                        f"[Requester] Received HTTP {response.status_code} on attempt {tried}/{self.MAX_RETRIES} for {netloc}. "
-                        f"Refreshing cookies and rotating session..."
-                    )
-                    if tried < self.MAX_RETRIES:
-                        # Reset session, rotate sticky proxy, and execute warmup GET for netloc
-                        self._init_session(rotate_proxy=True)
-                        self.warmup_domain(netloc, force=True)
-                        time.sleep(1)
-                        continue
+            while tried < self.MAX_RETRIES:
+                tried += 1
+                try:
+                    if is_catalog_request:
+                        response = self._fetch_catalog_items(url, params)
                     else:
+                        headers = self._get_api_headers()
+                        raw = self.session.get(url, params=params, headers=headers, allow_redirects=True, timeout_seconds=15)
+                        response = VintedResponse(raw_resp=raw, url=url)
+
+                    # Check for 401 or 403 (Cloudflare / Datadome block or expired session)
+                    if response.status_code in (401, 403):
+                        logger.warning(
+                            f"[Requester] Received HTTP {response.status_code} on attempt {tried}/{self.MAX_RETRIES} for {netloc}. "
+                            f"Refreshing cookies and rotating session..."
+                        )
+                        if tried < self.MAX_RETRIES:
+                            # Reset session, rotate sticky proxy, and execute warmup GET for netloc
+                            self._init_session(rotate_proxy=True)
+                            self.warmup_domain(netloc, force=True)
+                            time.sleep(1)
+                            continue
+                        else:
+                            return response
+
+                    if response.status_code == 200:
                         return response
 
-                if response.status_code == 200:
-                    return response
+                    if tried == self.MAX_RETRIES:
+                        return response
 
-                if tried == self.MAX_RETRIES:
-                    return response
+                except Exception as e:
+                    err_text = str(e).upper()
+                    is_proxy_issue = ("407" in err_text) or ("NO_USER" in err_text) or ("PROXY" in err_text)
+                    logger.warning(f"[Requester] Request failed (attempt {tried}/{self.MAX_RETRIES}): {e}")
 
-            except Exception as e:
-                err_text = str(e).upper()
-                is_proxy_issue = ("407" in err_text) or ("NO_USER" in err_text) or ("PROXY" in err_text)
-                logger.warning(f"[Requester] Request failed (attempt {tried}/{self.MAX_RETRIES}): {e}")
+                    if is_proxy_issue and not self.proxies and not direct_fallback_used:
+                        direct_fallback_used = True
+                        logger.warning("[Requester] Proxy error encountered. Retrying with fresh session without broken proxy.")
+                        self._init_session(rotate_proxy=True)
+                        self.set_cookies(force=True)
+                        continue
 
-                if is_proxy_issue and not self.proxies and not direct_fallback_used:
-                    direct_fallback_used = True
-                    logger.warning("[Requester] Proxy error encountered. Retrying with fresh session without broken proxy.")
-                    self._init_session(rotate_proxy=True)
-                    self.set_cookies(force=True)
-                    continue
+                    if tried == self.MAX_RETRIES:
+                        raise HTTPError(f"Request failed after {self.MAX_RETRIES} attempts: {e}")
 
-                if tried == self.MAX_RETRIES:
-                    raise HTTPError(f"Request failed after {self.MAX_RETRIES} attempts: {e}")
+                    time.sleep(1)
 
-                time.sleep(1)
-
-        raise HTTPError(f"Failed to get a valid response after {self.MAX_RETRIES} attempts for url: {url}")
+            raise HTTPError(f"Failed to get a valid response after {self.MAX_RETRIES} attempts for url: {url}")
 
     def post(self, url: str, params: Optional[dict] = None) -> VintedResponse:
         """
