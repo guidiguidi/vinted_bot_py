@@ -1,5 +1,9 @@
 # telegram_bot_plugin/telegram_bot.py
 import asyncio
+import os
+import multiprocessing
+import signal
+from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest
@@ -7,9 +11,9 @@ from logger import get_logger
 import db
 import core
 import db_commercial as db_tma
-import multiprocessing
-import signal
 from proxies import get_dataimpulse_usage_status, reset_proxy_cache
+
+load_dotenv()
 
 logger = get_logger(__name__)
 shutdown_event = asyncio.Event()
@@ -19,10 +23,8 @@ ADMIN_ID = 525127130
 # Состояния FSM
 STATE_WAITING_FOR_QUERY = "WAITING_FOR_QUERY"
 STATE_ADMIN_EDIT_PARAM = "ADMIN_EDIT_PARAM"
-STATE_WAITING_FOR_KEY = "WAITING_FOR_KEY"
 STATE_ADMIN_BROADCAST_TEXT = "ADMIN_BROADCAST_TEXT"
 STATE_ADMIN_SEARCH_USER = "ADMIN_SEARCH_USER"
-STATE_ADMIN_ADD_SUB_DAYS = "ADMIN_ADD_SUB_DAYS"
 STATE_WAITING_FOR_QUERY_RENAME = "WAITING_FOR_QUERY_RENAME"
 STATE_ADMIN_ADD_COUNTRY = "ADMIN_ADD_COUNTRY"
 STATE_ADMIN_REMOVE_COUNTRY = "ADMIN_REMOVE_COUNTRY"
@@ -182,28 +184,6 @@ def _build_countries_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def _build_payments_text() -> str:
-    crypto_price = db_tma.get_setting('crypto_price_usdt') or "5.0"
-    referral_days = db_tma.get_setting('referral_reward_days') or "5"
-    token = db_tma.get_setting('crypto_token') or ""
-    token_masked = _mask_token(token)
-    return (
-        "💰 <b>Настройки платежей</b>\n\n"
-        f"🤖 Цена Basic (USDT): <b>{crypto_price}</b>\n"
-        f"🎁 Referral reward (days): <b>{referral_days}</b>\n"
-        f"🔑 Crypto token: <code>{token_masked}</code>"
-    )
-
-
-def _build_payments_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 Цена Basic", callback_data="edt_cparam_crypto_price_usdt")],
-        [InlineKeyboardButton("🎁 Referral days", callback_data="edt_cparam_referral_reward_days")],
-        [InlineKeyboardButton("🔑 Crypto token", callback_data="edt_cparam_crypto_token")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="adm_settings")]
-    ])
-
-
 async def safe_edit_message(query, text, reply_markup=None, parse_mode='HTML'):
     """
     Telegram raises BadRequest when edit payload is identical.
@@ -219,9 +199,8 @@ async def safe_edit_message(query, text, reply_markup=None, parse_mode='HTML'):
 
 
 def _validate_admin_param_value(param_key: str, raw_value: str):
-    int_positive_keys = {"query_refresh_delay", "items_per_query", "referral_reward_days"}
+    int_positive_keys = {"query_refresh_delay", "items_per_query"}
     number_non_negative_keys = {"dataimpulse_plan_mb"}
-    float_positive_keys = {"crypto_price_usdt"}
 
     value = raw_value.strip()
     if not value:
@@ -245,15 +224,6 @@ def _validate_admin_param_value(param_key: str, raw_value: str):
             return True, normalized
         except ValueError:
             return False, "Нужно число (например: 51200)."
-
-    if param_key in float_positive_keys:
-        try:
-            parsed = float(value.replace(",", "."))
-            if parsed <= 0:
-                return False, "Нужно число больше 0."
-            return True, str(parsed)
-        except ValueError:
-            return False, "Нужно число (например: 5.0)."
 
     return True, value
 
@@ -301,14 +271,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
-            if p_type == "param":
-                db.set_parameter(key, validated_value)
-            else:
-                import sqlite3
-                conn = sqlite3.connect("vinted_notifications.db")
-                conn.execute("UPDATE commercial_settings SET value=? WHERE key=?", (validated_value, key))
-                conn.commit()
-                conn.close()
+            db.set_parameter(key, validated_value)
             await update.message.reply_text(f"✅ Параметр <b>{key}</b> обновлен: <code>{validated_value}</code>", parse_mode='HTML', reply_markup=main_menu_kb(chat_id))
         except Exception as e:
             logger.error(f"Error updating parameter {key}: {e}", exc_info=True)
@@ -430,28 +393,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "🔍 <b>Результаты поиска:</b>\n"
             kb_buttons = []
             for u in results[:5]:
-                u_status = "🟢" if db_tma.get_user_status(u['id']) != "No subscription" else "🔴"
-                btn_text = f"{u_status} {u['username'] or u['telegram_id']}"
+                btn_text = f"{'👑' if u.get('is_admin') else '👤'} {u['username'] or u['telegram_id']}"
                 kb_buttons.append([InlineKeyboardButton(btn_text, callback_data=f"adm_uinfo_{u['telegram_id']}")])
             
             kb_buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="adm_users_menu")])
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb_buttons), parse_mode='HTML')
-        user_data['state'] = None
-        return
-
-    if user_data.get('state') == STATE_ADMIN_ADD_SUB_DAYS:
-        try:
-            days = int(text.strip())
-            if days <= 0:
-                raise ValueError
-            target_id = user_data.get('target_user_id')
-            ok = db_tma.add_user_subscription_days(target_id, days)
-            if ok:
-                await update.message.reply_text(f"✅ Пользователю <code>{target_id}</code> добавлено <b>+{days}</b> дней.", parse_mode='HTML', reply_markup=main_menu_kb(chat_id))
-            else:
-                await update.message.reply_text("❌ Пользователь не найден.", reply_markup=main_menu_kb(chat_id))
-        except ValueError:
-            await update.message.reply_text("❌ Введите целое число дней больше 0.", reply_markup=main_menu_kb(chat_id))
         user_data['state'] = None
         return
 
@@ -657,8 +603,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_actions = (
         data.startswith("adm_")
         or data.startswith("edt_")
-        or data.startswith("gen_key_")
-        or data in ("set_scraper", "set_proxies", "set_payments", "admin_main")
+        or data in ("set_scraper", "set_proxies", "admin_main")
     )
     if admin_actions and not db_tma.is_admin(chat_id):
         await query.answer("Недостаточно прав.", show_alert=True)
@@ -674,14 +619,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "adm_close": await query.message.delete()
     elif data == "adm_stats":
         stats = db_tma.admin_get_stats()
-        msg = f"📊 <b>Статистика бота</b>\n\n👤 Пользователей: <b>{stats.get('total_users', 0)}</b>\n🟢 Активных: <b>{stats.get('active_users', 0)}</b>\n💵 Доход: <b>${stats.get('total_revenue', 0)}</b>"
+        msg = f"📊 <b>Статистика бота</b>\n\n👤 Всего пользователей: <b>{stats.get('total_users', 0)}</b>\n🟢 Активных: <b>{stats.get('active_users', 0)}</b>\n🔍 Поисковых запросов: <b>{stats.get('total_queries', 0)}</b>"
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin_main")]]), parse_mode='HTML')
     elif data == "adm_countries":
         await query.edit_message_text(_build_countries_text(), reply_markup=_build_countries_kb(), parse_mode='HTML')
     elif data == "adm_users_menu": await query.edit_message_text("👥 <b>Управление пользователями</b>", reply_markup=admin_users_kb(), parse_mode='HTML')
     elif data == "adm_list_users":
         users = db_tma.admin_get_users(limit=10)
-        kb_buttons = [[InlineKeyboardButton(f"{'🟢' if db_tma.has_active_subscription(u['id']) else '🔴'} {u['username'] or u['telegram_id']}", callback_data=f"adm_uinfo_{u['telegram_id']}")] for u in users]
+        kb_buttons = [[InlineKeyboardButton(f"{'👑' if u.get('is_admin') else '👤'} {u['username'] or u['telegram_id']}", callback_data=f"adm_uinfo_{u['telegram_id']}")] for u in users]
         kb_buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="adm_users_menu")])
         await query.edit_message_text("👥 <b>Последние 10 пользователей:</b>", reply_markup=InlineKeyboardMarkup(kb_buttons), parse_mode='HTML')
     elif data == "adm_search_user":
@@ -690,16 +635,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("adm_uinfo_"):
         uid = int(data.split("_")[2]); user_list = db_tma.search_users(str(uid))
         if not user_list: await query.edit_message_text("❌ Не найден."); return
-        user = user_list[0]; status = db_tma.get_user_status(user['id'])
+        user = user_list[0]
         is_user_admin = bool(user['is_admin'])
         is_user_banned = bool(user['is_banned'])
         admin_btn_text = "❌ Снять админа" if is_user_admin else "👑 Сделать админом"
         ban_btn_text = "✅ Разбанить" if is_user_banned else "🚫 Забанить"
         
-        msg = f"👤 <b>Инфо о пользователе</b>\n\n🆔 ID: <code>{user['telegram_id']}</code>\n👤 User: @{user['username']}\n📊 Подписка: <b>{status}</b>\n🛡 Админ: <b>{'Да' if is_user_admin else 'Нет'}</b>\n🚫 Бан: <b>{'Да' if is_user_banned else 'Нет'}</b>"
+        msg = f"👤 <b>Инфо о пользователе</b>\n\n🆔 ID: <code>{user['telegram_id']}</code>\n👤 User: @{user['username'] or 'N/A'}\n🛡 Админ: <b>{'Да' if is_user_admin else 'Нет'}</b>\n🚫 Бан: <b>{'Да' if is_user_banned else 'Нет'}</b>"
         
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📅 Добавить дни", callback_data=f"adm_add_days_{uid}")],
             [InlineKeyboardButton(admin_btn_text, callback_data=f"adm_toggle_admin_{uid}_{'0' if is_user_admin else '1'}")],
             [InlineKeyboardButton(ban_btn_text, callback_data=f"adm_toggle_ban_{uid}_{'0' if is_user_banned else '1'}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="adm_users_menu")]
@@ -711,13 +655,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = int(parts[3])
         new_status = bool(int(parts[4]))
         db_tma.set_admin_status(uid, new_status)
-        # Re-display user info to show changes
         user_list = db_tma.search_users(str(uid))
         user = user_list[0]
-        status = db_tma.get_user_status(user['id'])
+        is_user_banned = bool(user['is_banned'])
         admin_btn_text = "❌ Снять админа" if new_status else "👑 Сделать админом"
-        msg = f"✅ Статус обновлен!\n\n👤 <b>Инфо</b>\n🆔 ID: <code>{user['telegram_id']}</code>\n👤 User: @{user['username']}\n📊 Sub: <b>{status}</b>\n🛡 Admin: <b>{'Да' if new_status else 'Нет'}</b>"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📅 Добавить дни", callback_data=f"adm_add_days_{uid}")], [InlineKeyboardButton(admin_btn_text, callback_data=f"adm_toggle_admin_{uid}_{'0' if new_status else '1'}")], [InlineKeyboardButton("⬅️ Назад", callback_data="adm_users_menu")]])
+        ban_btn_text = "✅ Разбанить" if is_user_banned else "🚫 Забанить"
+        msg = f"✅ Статус обновлен!\n\n👤 <b>Инфо</b>\n🆔 ID: <code>{user['telegram_id']}</code>\n👤 User: @{user['username'] or 'N/A'}\n🛡 Admin: <b>{'Да' if new_status else 'Нет'}</b>\n🚫 Бан: <b>{'Да' if is_user_banned else 'Нет'}</b>"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(admin_btn_text, callback_data=f"adm_toggle_admin_{uid}_{'0' if new_status else '1'}")],
+            [InlineKeyboardButton(ban_btn_text, callback_data=f"adm_toggle_ban_{uid}_{'0' if is_user_banned else '1'}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="adm_users_menu")]
+        ])
         await query.edit_message_text(msg, reply_markup=kb, parse_mode='HTML')
 
     elif data.startswith("adm_toggle_ban_"):
@@ -725,23 +673,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = int(parts[3])
         new_status = bool(int(parts[4]))
         db_tma.ban_user(uid, new_status)
-        # Re-display user info
         user_list = db_tma.search_users(str(uid))
-        user = user_list[0]; status = db_tma.get_user_status(user['id'])
+        user = user_list[0]
         is_user_admin = bool(user['is_admin'])
         admin_btn_text = "❌ Снять админа" if is_user_admin else "👑 Сделать админом"
         ban_btn_text = "✅ Разбанить" if new_status else "🚫 Забанить"
-        msg = f"✅ Статус обновлен!\n\n👤 <b>Инфо</b>\n🆔 ID: <code>{user['telegram_id']}</code>\n👤 User: @{user['username']}\n📊 Sub: <b>{status}</b>\n🛡 Admin: <b>{'Да' if is_user_admin else 'Нет'}</b>\n🚫 Бан: <b>{'Да' if new_status else 'Нет'}</b>"
+        msg = f"✅ Статус обновлен!\n\n👤 <b>Инфо</b>\n🆔 ID: <code>{user['telegram_id']}</code>\n👤 User: @{user['username'] or 'N/A'}\n🛡 Admin: <b>{'Да' if is_user_admin else 'Нет'}</b>\n🚫 Бан: <b>{'Да' if new_status else 'Нет'}</b>"
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📅 Добавить дни", callback_data=f"adm_add_days_{uid}")],
             [InlineKeyboardButton(admin_btn_text, callback_data=f"adm_toggle_admin_{uid}_{'0' if is_user_admin else '1'}")],
             [InlineKeyboardButton(ban_btn_text, callback_data=f"adm_toggle_ban_{uid}_{'0' if new_status else '1'}")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="adm_users_menu")]
         ])
         await query.edit_message_text(msg, reply_markup=kb, parse_mode='HTML')
-    elif data.startswith("adm_add_days_"):
-        user_data['state'] = STATE_ADMIN_ADD_SUB_DAYS; user_data['target_user_id'] = int(data.split("_")[3])
-        await query.message.reply_text("📅 Кол-во дней:")
     elif data == "adm_broadcast":
         user_data['state'] = STATE_ADMIN_BROADCAST_TEXT; await query.message.reply_text("📢 Текст рассылки (HTML):")
     elif data == "adm_logs":
@@ -751,8 +694,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: await query.edit_message_text("❌ Ошибка логов.")
     elif data == "adm_settings":
         await safe_edit_message(query, "⚙️ <b>Настройки</b>", reply_markup=admin_settings_kb(), parse_mode='HTML')
-    elif data == "set_payments":
-        await safe_edit_message(query, _build_payments_text(), reply_markup=_build_payments_kb(), parse_mode='HTML')
     elif data == "adm_country_add":
         user_data['state'] = STATE_ADMIN_ADD_COUNTRY
         await query.message.reply_text("➕ Введите код страны (например, <code>PL</code>):", parse_mode='HTML')
@@ -996,8 +937,12 @@ async def notify_new_items(queue, bot, chat_ids):
 def signal_handler(sig, frame): shutdown_event.set()
 
 def run_bot_in_process(queue: multiprocessing.Queue):
-    token = db.get_parameter('telegram_token')
-    if not token: return
+    load_dotenv()
+    token = os.getenv('TELEGRAM_TOKEN') or db.get_parameter('telegram_token')
+    if not token:
+        logger.error("TELEGRAM_TOKEN is not configured! Please set it in .env")
+        return
+    db.set_parameter('telegram_token', token)
     signal.signal(signal.SIGINT, signal_handler); signal.signal(signal.SIGTERM, signal_handler)
     application = Application.builder().token(token).build()
 

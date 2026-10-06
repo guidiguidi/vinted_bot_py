@@ -3,10 +3,13 @@ import time
 import core
 import os
 import db
+from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from logger import get_logger
 import logging
 import signal
+
+load_dotenv()
 
 # Configure logging to handle Unicode characters
 logging.basicConfig(
@@ -40,13 +43,18 @@ def initialize_database():
                 return False
             db.create_or_update_sqlite_db(sql_file)
             logger.info("Database created successfully")
-            return True
         except Exception as e:
             logger.error(f"Error creating database: {e}")
             return False
     else:
         logger.info("Database already exists")
-        return True
+
+    # Automatically sync TELEGRAM_TOKEN from .env to database if present
+    token = os.getenv("TELEGRAM_TOKEN")
+    if token:
+        db.set_parameter("telegram_token", token)
+
+    return True
 
 def scraper_process(items_queue):
     logger.info("Scrape process started")
