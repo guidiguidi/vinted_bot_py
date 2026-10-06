@@ -16,8 +16,9 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 
+import os
 CHANNEL = "ag:snipe"
-REDIS_URL = "redis://localhost:6379/0"
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # ---------------------------------------------------------------------------
 # Async interface (for sniper daemon)

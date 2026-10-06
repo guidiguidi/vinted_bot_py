@@ -11,14 +11,9 @@ import signal
 
 load_dotenv()
 
-# Configure logging to handle Unicode characters
-logging.basicConfig(
-    filename='logs/vinted.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    encoding='utf-8'
-)
-
+# Configure logging for console (stdout / Heroku) and file
+from logger import configure_root_logger, get_logger
+configure_root_logger()
 logger = get_logger(__name__)
 
 shutdown_event = multiprocessing.Event()
@@ -32,24 +27,54 @@ scrape_process = None
 sniper_proc = None
 current_query_refresh_delay = None
 
-def initialize_database():
-    db_file = "./vinted_notifications.db"
-    sql_file = "initial_db.sql"
-    if not os.path.exists(db_file):
-        logger.info("Database not found. Creating new database...")
-        try:
-            if not os.path.exists(sql_file):
-                logger.error(f"SQL file {sql_file} not found! Cannot create database.")
-                return False
-            db.create_or_update_sqlite_db(sql_file)
-            logger.info("Database created successfully")
-        except Exception as e:
-            logger.error(f"Error creating database: {e}")
-            return False
-    else:
-        logger.info("Database already exists")
+def start_health_server():
+    """Starts a minimal HTTP server if PORT environment variable is set (Heroku web dyno support)."""
+    port_str = os.getenv("PORT")
+    if not port_str:
+        return
+    try:
+        import http.server
+        import socketserver
+        import threading
 
-    # Automatically sync TELEGRAM_TOKEN from .env to database if present
+        port = int(port_str)
+
+        class HealthHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b'{"status": "ok", "service": "vinted-bot"}\n')
+
+            def log_message(self, format, *args):
+                pass
+
+        class ReusableTCPServer(socketserver.TCPServer):
+            allow_reuse_address = True
+
+        httpd = ReusableTCPServer(("", port), HealthHandler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"Health server listening on port {port}")
+    except Exception as e:
+        logger.error(f"Failed to start health server: {e}")
+
+def initialize_database():
+    sql_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "initial_db.sql")
+    if not os.path.exists(sql_file):
+        sql_file = "initial_db.sql"
+    try:
+        if os.path.exists(sql_file):
+            db.create_or_update_sqlite_db(sql_file)
+            logger.info("Database initialized successfully")
+        else:
+            logger.error(f"SQL file {sql_file} not found! Cannot initialize database.")
+            return False
+    except Exception as e:
+        logger.error(f"Error creating database: {e}")
+        return False
+
+    # Automatically sync TELEGRAM_TOKEN from environment/.env to database if present
     token = os.getenv("TELEGRAM_TOKEN")
     if token:
         db.set_parameter("telegram_token", token)
@@ -58,7 +83,7 @@ def initialize_database():
 
 def scraper_process(items_queue):
     logger.info("Scrape process started")
-    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay"))
+    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay") or 60)
     logger.info(f"Using query refresh delay of {current_query_refresh_delay} seconds")
     int(time.time()) - 180
     scraper_scheduler = BackgroundScheduler()
@@ -131,7 +156,7 @@ def check_refresh_delay(items_queue):
     if scrape_process is None or not scrape_process.is_alive():
         return
     try:
-        new_delay = int(db.get_parameter("query_refresh_delay"))
+        new_delay = int(db.get_parameter("query_refresh_delay") or 60)
         if new_delay != current_query_refresh_delay:
             logger.info(f"Query refresh delay changed from {current_query_refresh_delay} to {new_delay} seconds")
             current_query_refresh_delay = new_delay
@@ -181,6 +206,7 @@ def plugin_checker():
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    start_health_server()
     if not initialize_database():
         logger.error("Failed to initialize database. Exiting.")
         exit(1)
@@ -199,7 +225,7 @@ if __name__ == "__main__":
     telegram_status = "Running" if telegram_process and telegram_process.is_alive() else "Stopped"
     logger.info(f"Telegram process status: {telegram_status}")
     logger.info("Starting scrape process...")
-    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay"))
+    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay") or 60)
     scrape_process = multiprocessing.Process(target=scraper_process, args=(items_queue,), name="Scraper")
     scrape_process.start()
     logger.info("Starting item extractor process...")

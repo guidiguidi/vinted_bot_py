@@ -18,7 +18,10 @@ load_dotenv()
 logger = get_logger(__name__)
 shutdown_event = asyncio.Event()
 
-ADMIN_ID = 525127130
+try:
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "525127130"))
+except Exception:
+    ADMIN_ID = 525127130
 
 # Состояния FSM
 STATE_WAITING_FOR_QUERY = "WAITING_FOR_QUERY"
@@ -970,7 +973,7 @@ def run_bot_in_process(queue: multiprocessing.Queue):
             await application.initialize()
             await application.start()
             asyncio.create_task(notify_new_items(queue, application.bot, set()))
-            await application.updater.start_polling()
+            await application.updater.start_polling(drop_pending_updates=True)
             await shutdown_event.wait()
             await application.updater.stop()
     loop = asyncio.new_event_loop()

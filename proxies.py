@@ -150,7 +150,10 @@ def get_random_proxy() -> Optional[str]:
 
     # Get the last proxy check time from the database
     last_proxy_check_time_str = db.get_parameter("last_proxy_check_time")
-    last_proxy_check_time = float(last_proxy_check_time_str) if last_proxy_check_time_str else 0
+    try:
+        last_proxy_check_time = float(last_proxy_check_time_str) if last_proxy_check_time_str else 0
+    except (ValueError, TypeError):
+        last_proxy_check_time = 0
 
     # Check if we need to recheck proxies (if more than PROXY_RECHECK_INTERVAL seconds have passed)
     if (_PROXY_CACHE_INITIALIZED and

@@ -3,11 +3,27 @@ from traceback import print_exc
 import os
 from datetime import datetime
 
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vinted_notifications.db")
+SQL_INIT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "initial_db.sql")
+
+def _init_db_if_needed(conn):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parameters'")
+        if not cursor.fetchone():
+            if os.path.exists(SQL_INIT_PATH):
+                with open(SQL_INIT_PATH, "r", encoding="utf-8") as f:
+                    conn.executescript(f.read())
+                conn.commit()
+    except Exception:
+        print_exc()
+
 def get_db_connection():
-    conn = sqlite3.connect("vinted_notifications.db", timeout=30.0)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA foreign_keys = ON")
+    _init_db_if_needed(conn)
     return conn
 
 def create_or_update_sqlite_db(db_path):
