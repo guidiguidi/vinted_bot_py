@@ -37,19 +37,11 @@ STATE_ADMIN_ADD_PROXY = "ADMIN_ADD_PROXY"
 STATE_ADMIN_SET_PROXY_LIST = "ADMIN_SET_PROXY_LIST"
 STATE_ADMIN_SET_PROXY_LINK = "ADMIN_SET_PROXY_LINK"
 
-# Состояния для снайпера
-STATE_SNIPER_SET_PROXY = "SNIPER_SET_PROXY"
-STATE_SNIPER_SET_COOKIE = "SNIPER_SET_COOKIE"
-STATE_SNIPER_SET_DOMAIN = "SNIPER_SET_DOMAIN"
-
-
-
 # --- КЛАВИАТУРЫ ---
 
 MAIN_MENU_TEXTS = {
     "➕ Добавить запрос",
     "📄 Мои запросы",
-    "🎯 Снайпер",
     "🌐 Прокси",
     "⚙️ Настройки",
     "📊 Статус",
@@ -59,9 +51,8 @@ MAIN_MENU_TEXTS = {
 def main_menu_kb(chat_id: int = None) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text="➕ Добавить запрос"), KeyboardButton(text="📄 Мои запросы")],
-        [KeyboardButton(text="🎯 Снайпер"), KeyboardButton(text="🌐 Прокси")],
-        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📊 Статус")],
-        [KeyboardButton(text="🛠 Админ-панель")],
+        [KeyboardButton(text="🌐 Прокси"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🛠 Админ-панель")],
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -73,7 +64,6 @@ def admin_hub_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🌍 Страны", callback_data="adm_countries")],
         [InlineKeyboardButton("📢 Рассылка", callback_data="adm_broadcast"),
          InlineKeyboardButton("📜 Логи", callback_data="adm_logs")],
-        [InlineKeyboardButton("🎯 Снайпер", callback_data="adm_sniper_menu")],
         [InlineKeyboardButton("⬅️ Закрыть", callback_data="adm_close")]
     ])
 
@@ -92,21 +82,6 @@ def admin_users_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔍 Поиск юзера", callback_data="adm_search_user")],
         [InlineKeyboardButton("📜 Список (Топ 10)", callback_data="adm_list_users")],
         [InlineKeyboardButton("⬅️ Закрыть", callback_data="adm_close")]
-    ])
-
-def sniper_menu_kb(user_id: int = None) -> InlineKeyboardMarkup:
-    """User menu for personal AntiGravity Sniper settings."""
-    user_id = user_id or ADMIN_ID
-    settings = db_tma.get_user_sniper_settings(user_id)
-    enabled = settings.get('enabled')
-    toggle_data = "sniper_toggle"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(f"{'🟢' if enabled else '🔴'} Статус: {'ВКЛ' if enabled else 'ВЫКЛ'}", callback_data=toggle_data)],
-        [InlineKeyboardButton("🌐 Прокси снайпера", callback_data="sniper_set_proxy"),
-         InlineKeyboardButton("🍪 Cookie", callback_data="sniper_set_cookie")],
-        [InlineKeyboardButton("🌍 Домен", callback_data="sniper_set_domain"),
-         InlineKeyboardButton("📊 Логи (10)", callback_data="sniper_logs")],
-        [InlineKeyboardButton("⬅️ Закрыть", callback_data="sniper_close")]
     ])
 
 
@@ -326,47 +301,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data['state'] = None
         return
 
-    # --- Sniper FSM states ---
-    if user_data.get('state') == STATE_SNIPER_SET_PROXY:
-        if text == "❌ Отмена":
-            user_data['state'] = None
-            await update.message.reply_text("Отменено.", reply_markup=main_menu_kb(chat_id))
-            return
-        proxy_val = text.strip()
-        if "://" not in proxy_val and proxy_val.count(":") == 3:
-            parts = proxy_val.split(":")
-            proxy_val = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
-        elif "://" not in proxy_val and proxy_val.count(":") == 1:
-            proxy_val = f"http://{proxy_val}"
-            
-        db_tma.update_user_sniper_setting(chat_id, 'proxy', proxy_val)
-        await update.message.reply_text(f"✅ Прокси снайпера сохранен: <code>{proxy_val}</code>", parse_mode='HTML', reply_markup=main_menu_kb(chat_id))
-        user_data['state'] = None
-        return
-
-    if user_data.get('state') == STATE_SNIPER_SET_COOKIE:
-        if text == "❌ Отмена":
-            user_data['state'] = None
-            await update.message.reply_text("Отменено.", reply_markup=main_menu_kb(chat_id))
-            return
-        db_tma.update_user_sniper_setting(chat_id, 'session_cookie', text.strip())
-        await update.message.reply_text("✅ Session cookie обновлен!", reply_markup=main_menu_kb(chat_id))
-        user_data['state'] = None
-        return
-
-    if user_data.get('state') == STATE_SNIPER_SET_DOMAIN:
-        if text == "❌ Отмена":
-            user_data['state'] = None
-            await update.message.reply_text("Отменено.", reply_markup=main_menu_kb(chat_id))
-            return
-        domain = text.strip().lower()
-        if not domain.startswith("www.vinted."):
-            await update.message.reply_text("❌ Некорректный домен. Используйте формат: www.vinted.fr")
-            return
-        db_tma.update_user_sniper_setting(chat_id, 'domain', domain)
-        await update.message.reply_text(f"✅ Домен установлен: {domain}", reply_markup=main_menu_kb(chat_id))
-        user_data['state'] = None
-        return
 
     if user_data.get('state') == STATE_ADMIN_BROADCAST_TEXT:
         if text == "❌ Отмена":
@@ -518,23 +452,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Error displaying queries for user {chat_id}: {e}", exc_info=True)
             await update.message.reply_text("❌ <b>Произошла ошибка при загрузке ваших запросов.</b>", parse_mode='HTML', reply_markup=main_menu_kb(chat_id))
 
-    elif text in ("🎯 Снайпер", "🎯 Мой Снайпер"):
-        settings = db_tma.get_user_sniper_settings(chat_id)
-        enabled = settings.get('enabled')
-        domain = settings.get('domain') or 'www.vinted.fr'
-        proxy = settings.get('proxy') or 'не задан'
-        cookie = settings.get('session_cookie') or ''
-        cookie_display = f"{cookie[:20]}..." if len(cookie) > 20 else (cookie or 'не задан')
-        
-        text_msg = (
-            f"🎯 <b>AntiGravity Sniper</b>\n\n"
-            f"Статус: <b>{'🟢 ВКЛ' if enabled else '🔴 ВЫКЛ'}</b>\n"
-            f"Домен: <code>{domain}</code>\n"
-            f"Прокси: <code>{proxy[:40]}</code>\n"
-            f"Cookie: <code>{cookie_display}</code>\n"
-        )
-        await update.message.reply_text(text_msg, reply_markup=sniper_menu_kb(chat_id), parse_mode='HTML')
-
     elif text == "🌐 Прокси":
         p_check = db.get_parameter('check_proxies') or "False"
         msg = _build_proxy_settings_text()
@@ -555,7 +472,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, reply_markup=admin_settings_kb(), parse_mode='HTML')
 
     elif text == "📊 Статус":
-        from sniper.redis_bus import is_redis_available
         user_queries = db.get_queries(user_id=chat_id)
         q_count = len(user_queries) if user_queries else 0
         total_queries = db.get_total_queries_count()
@@ -571,26 +487,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             proxy_status = "⚠️ Не заданы (прямой IP)"
 
-        s_settings = db_tma.get_user_sniper_settings(chat_id)
-        s_enabled = s_settings.get("enabled")
-        s_domain = s_settings.get("domain") or "www.vinted.fr"
-        s_proxy = "Задан ✅" if s_settings.get("proxy") else "Не задан ⚠️"
-        s_cookie = "Задан ✅" if s_settings.get("session_cookie") else "Не задан ⚠️"
-        redis_status = "✅ Работает" if is_redis_available() else "⚠️ Не запущен (нужен для снайпера)"
-
         status_msg = (
             "📊 <b>Статус системы</b>\n\n"
             f"🤖 <b>Скрейпер:</b>\n"
             f"• Моих запросов: <b>{q_count}</b> (всего в базе: {total_queries})\n"
             f"• Интервал проверки: <b>{delay} сек</b>\n"
             f"• Прокси скрейпера: <b>{proxy_status}</b>\n"
-            f"• Автопроверка прокси: <b>{'Вкл' if p_check == 'True' else 'Выкл'}</b>\n\n"
-            f"🎯 <b>Снайпер (автопокупка):</b>\n"
-            f"• Статус: <b>{'🟢 ВКЛ' if s_enabled else '🔴 ВЫКЛ'}</b>\n"
-            f"• Домен: <code>{s_domain}</code>\n"
-            f"• Прокси снайпера: <b>{s_proxy}</b>\n"
-            f"• Session Cookie: <b>{s_cookie}</b>\n"
-            f"• Redis IPC: <b>{redis_status}</b>\n"
+            f"• Автопроверка прокси: <b>{'Вкл' if p_check == 'True' else 'Выкл'}</b>\n"
         )
         await update.message.reply_text(status_msg, reply_markup=main_menu_kb(chat_id), parse_mode='HTML')
 
@@ -765,113 +668,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.clear_items_only()
         await query.edit_message_text("✅ База товаров очищена!", reply_markup=admin_settings_kb(), parse_mode='HTML')
 
-    # --- SNIPER MENU ---
-    elif data == "adm_sniper_menu":
-        enabled = db.get_parameter('sniper_enabled') == 'True'
-        domain = db.get_parameter('sniper_vinted_domain') or 'www.vinted.fr'
-        proxy = db.get_parameter('sniper_proxy') or 'не задан'
-        cookie = db.get_parameter('sniper_session_cookie') or ''
-        cookie_display = f"{cookie[:20]}..." if len(cookie) > 20 else (cookie or 'не задан')
-        text = (
-            f"🎯 <b>AntiGravity Sniper</b>\n\n"
-            f"Статус: <b>{'🟢 ВКЛ' if enabled else '🔴 ВЫКЛ'}</b>\n"
-            f"Домен: <code>{domain}</code>\n"
-            f"Прокси: <code>{proxy[:40]}</code>\n"
-            f"Cookie: <code>{cookie_display}</code>\n"
-        )
-        await safe_edit_message(query, text, reply_markup=sniper_menu_kb(chat_id), parse_mode='HTML')
-
-    elif data == "sniper_toggle":
-        settings = db_tma.get_user_sniper_settings(chat_id)
-        current = settings.get('enabled')
-        new_val = not current
-        db_tma.update_user_sniper_setting(chat_id, 'enabled', new_val)
-        db.set_parameter('sniper_enabled', 'True' if new_val else 'False')
-        await query.answer(f"Снайпер {'включен ✅' if new_val else 'выключен ❌'}")
-        
-        # Re-render menu
-        settings = db_tma.get_user_sniper_settings(chat_id)
-        enabled = settings.get('enabled')
-        domain = settings.get('domain') or 'www.vinted.fr'
-        proxy = settings.get('proxy') or 'не задан'
-        cookie = settings.get('session_cookie') or ''
-        cookie_display = f"{cookie[:20]}..." if len(cookie) > 20 else (cookie or 'не задан')
-        
-        text = (
-            f"🎯 <b>AntiGravity Sniper</b>\n\n"
-            f"Статус: <b>{'🟢 ВКЛ' if enabled else '🔴 ВЫКЛ'}</b>\n"
-            f"Домен: <code>{domain}</code>\n"
-            f"Прокси: <code>{proxy[:40]}</code>\n"
-            f"Cookie: <code>{cookie_display}</code>\n\n"
-            f"⚠️ Требуется до 3 минут для применения."
-        )
-        await safe_edit_message(query, text, reply_markup=sniper_menu_kb(chat_id), parse_mode='HTML')
-
-    elif data == "sniper_set_proxy":
-        user_data['state'] = STATE_SNIPER_SET_PROXY
-        await query.message.reply_text(
-            "🌐 Введите прокси для снайпера (формат: protocol://user:pass@host:port):\n\n"
-            "⚠️ Используйте <b>статический ISP-прокси</b> страны аккаунта!",
-            parse_mode='HTML',
-            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("❌ Отмена")]], resize_keyboard=True)
-        )
-
-    elif data == "sniper_set_cookie":
-        user_data['state'] = STATE_SNIPER_SET_COOKIE
-        await query.message.reply_text(
-            "🍪 Введите <code>_vinted_fr_session</code> cookie:\n\n"
-            "Получите его из DevTools браузера (Application → Cookies).",
-            parse_mode='HTML',
-            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("❌ Отмена")]], resize_keyboard=True)
-        )
-
-    elif data == "sniper_set_domain":
-        user_data['state'] = STATE_SNIPER_SET_DOMAIN
-        await query.message.reply_text(
-            "🌍 Введите домен Vinted (например: www.vinted.fr, www.vinted.de, www.vinted.pl):",
-            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("❌ Отмена")]], resize_keyboard=True)
-        )
-
-    elif data == "sniper_logs":
-        try:
-            import sqlite3
-            conn = sqlite3.connect('vinted_notifications.db')
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT item_id, item_title, status, latency_ms, created_at "
-                "FROM snipe_log WHERE target_user_id = ? ORDER BY id DESC LIMIT 10",
-                (chat_id,)
-            )
-            rows = cursor.fetchall()
-            conn.close()
-
-            if not rows:
-                await query.edit_message_text(
-                    "📊 <b>Ваши логи снайпера пусты</b>",
-                    reply_markup=sniper_menu_kb(chat_id), parse_mode='HTML'
-                )
-            else:
-                from datetime import datetime
-                lines = []
-                for item_id, title, status, lat, ts in rows:
-                    emoji = {'reserved': '🎯', 'sold': '❌', 'error': '⚠️', 'rate_limited': '🐌', 'session_dead': '💀'}.get(status, '❓')
-                    t = datetime.fromtimestamp(ts).strftime('%H:%M:%S') if ts else '??:??:??'
-                    lines.append(f"{emoji} <code>{t}</code> {(title or 'N/A')[:25]} | {lat:.0f}ms")
-                text = "📊 <b>Последние снайпы:</b>\n\n" + "\n".join(lines)
-                await query.edit_message_text(
-                    text, reply_markup=sniper_menu_kb(chat_id), parse_mode='HTML'
-                )
-        except Exception as e:
-            await query.edit_message_text(
-                f"❌ Ошибка чтения логов: {e}",
-                reply_markup=sniper_menu_kb(chat_id), parse_mode='HTML'
-            )
-
-    elif data == "sniper_close":
-        try:
-            await query.message.delete()
-        except:
-            await query.edit_message_text("Закрыто.")
 
     elif data.startswith("edt_"):
         parts = data.split("_", 2); user_data['state'] = STATE_ADMIN_EDIT_PARAM; user_data['edit_target'] = (parts[1], parts[2])

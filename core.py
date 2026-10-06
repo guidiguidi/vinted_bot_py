@@ -268,23 +268,6 @@ def clear_item_queue(items_queue, new_items_queue):
                 # photo is handled by telegram_bot if needed, but here we just pass it
                 new_items_queue.put((content, item.url, "🔎 Открыть", item.photo, item.buy_url, target_user_id))
 
-                # Publish to Redis for AntiGravity Sniper (non-blocking)
-                try:
-                    from sniper.redis_bus import publish_snipe_trigger_sync
-                    publish_snipe_trigger_sync({
-                        "item_id": item.id,
-                        "price": str(item.price),
-                        "currency": item.currency,
-                        "title": item.title,
-                        "url": item.url,
-                        "photo_url": item.photo,
-                        "target_user_id": target_user_id,
-                        "query_id": query_id,
-                        "ts_found": time.time(),
-                    })
-                except Exception as e:
-                    logger.debug(f"Redis snipe publish skipped: {e}")
-
                 # Add item to database
                 db.add_item_to_db(
                     id=item.id,

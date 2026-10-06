@@ -178,45 +178,4 @@ def admin_get_users(limit=50):
     return [dict(row) for row in rows]
 
 
-# --- MULTI-ACCOUNT SNIPER ---
 
-def get_user_sniper_settings(user_id):
-    """Get sniper settings for a specific telegram_id."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM user_sniper_settings WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return dict(row)
-    return {
-        "user_id": user_id,
-        "enabled": False,
-        "proxy": "",
-        "session_cookie": "",
-        "domain": "www.vinted.fr"
-    }
-
-
-def update_user_sniper_setting(user_id, key, value):
-    """Update a specific sniper setting for a telegram_id."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO user_sniper_settings (user_id) VALUES (?)", (user_id,))
-
-    if key in ["enabled", "proxy", "session_cookie", "domain"]:
-        query = f"UPDATE user_sniper_settings SET {key} = ?, updated_at = strftime('%s', 'now') WHERE user_id = ?"
-        cursor.execute(query, (value, user_id))
-
-    conn.commit()
-    conn.close()
-
-
-def get_all_enabled_snipers():
-    """Returns a list of user_id for users who have sniper enabled."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM user_sniper_settings WHERE enabled = 1")
-    rows = cursor.fetchall()
-    conn.close()
-    return [row['user_id'] for row in rows]
