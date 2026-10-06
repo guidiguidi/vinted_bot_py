@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timezone
 
 class Item:
@@ -6,19 +7,6 @@ class Item:
 
     This class parses and stores various attributes of a Vinted item,
     such as id, title, brand, size, price, etc.
-
-    Attributes:
-        raw_data (dict): The raw data of the item as received from the API.
-        id (str): The unique identifier of the item.
-        title (str): The title of the item.
-        brand_title (str): The brand of the item.
-        size_title (str): The size of the item, or None if not available.
-        currency (str): The currency code of the item's price.
-        price (float): The price of the item.
-        photo (str): The URL of the item's photo.
-        url (str): The URL of the item on Vinted.
-        created_at_ts (datetime): The timestamp when the item was created.
-        raw_timestamp (int): The raw timestamp value from the API.
     """
     def __init__(self, data):
         """
@@ -28,25 +16,82 @@ class Item:
             data (dict): The item data from the Vinted API.
         """
         self.raw_data = data
-        self.id = data["id"]
-        self.title = data["title"]
-        self.brand_title = data["brand_title"]
-        try:
+        prod = data.get("productItem", data) if isinstance(data, dict) else {}
+
+        self.id = prod.get("id") or (data.get("id") if isinstance(data, dict) else None)
+        self.title = prod.get("title") or (data.get("title", "") if isinstance(data, dict) else "")
+
+        # Brand title
+        if isinstance(data, dict) and "brand_title" in data:
+            self.brand_title = data["brand_title"]
+        elif isinstance(prod, dict) and "brand_title" in prod:
+            self.brand_title = prod["brand_title"]
+        elif isinstance(prod, dict) and "itemBox" in prod and isinstance(prod["itemBox"], dict) and prod["itemBox"].get("firstLine"):
+            self.brand_title = prod["itemBox"]["firstLine"]
+        else:
+            self.brand_title = "N/A"
+
+        # Size title
+        if isinstance(data, dict) and "size_title" in data:
             self.size_title = data["size_title"]
-        except KeyError:
-            # If size_title is not available, set it to None
+        elif isinstance(prod, dict) and "size_title" in prod:
+            self.size_title = prod["size_title"]
+        elif isinstance(prod, dict) and "itemBox" in prod and isinstance(prod["itemBox"], dict) and prod["itemBox"].get("secondLine"):
+            parts = str(prod["itemBox"]["secondLine"]).split("·")
+            self.size_title = parts[0].strip() if parts else None
+        else:
             self.size_title = None
-        self.currency = data["price"]["currency_code"]
-        self.price = data["price"]["amount"]
-        self.photo = data["photo"]["url"]
-        self.url = data["url"]
-        # We keep everything before the "items"
-        self.buy_url = data["url"].split("items")[
-                           0] + "transaction/buy/new?source_screen=item&transaction%5Bitem_id%5D=" + str(data["id"])
-        self.created_at_ts = datetime.fromtimestamp(
-            data["photo"]["high_resolution"]["timestamp"], tz=timezone.utc
-        )
-        self.raw_timestamp = data["photo"]["high_resolution"]["timestamp"]
+
+        # Price & Currency
+        price_obj = prod.get("price") or (data.get("price") if isinstance(data, dict) else {})
+        if isinstance(price_obj, dict):
+            self.currency = price_obj.get("currency_code") or price_obj.get("currencyCode") or "EUR"
+            try:
+                self.price = float(price_obj.get("amount", 0.0))
+            except (ValueError, TypeError):
+                self.price = price_obj.get("amount", 0.0)
+        else:
+            self.currency = "EUR"
+            try:
+                self.price = float(price_obj)
+            except (ValueError, TypeError):
+                self.price = price_obj
+
+        # Photo URL
+        if isinstance(data, dict) and "photo" in data and isinstance(data["photo"], dict) and "url" in data["photo"]:
+            self.photo = data["photo"]["url"]
+        elif isinstance(prod, dict) and "thumbnailUrl" in prod:
+            self.photo = prod["thumbnailUrl"]
+        elif isinstance(prod, dict) and "photos" in prod and isinstance(prod["photos"], list) and len(prod["photos"]) > 0:
+            self.photo = prod["photos"][0].get("url", "")
+        else:
+            self.photo = ""
+
+        # Item URL
+        raw_url = prod.get("url") or (data.get("url", "") if isinstance(data, dict) else "")
+        if str(raw_url).startswith("http"):
+            self.url = str(raw_url)
+        else:
+            self.url = f"https://www.vinted.fr{raw_url}"
+
+        # Buy URL
+        if isinstance(data, dict) and "url" in data and "items" in str(data["url"]):
+            self.buy_url = str(data["url"]).split("items")[0] + "transaction/buy/new?source_screen=item&transaction%5Bitem_id%5D=" + str(self.id)
+        else:
+            self.buy_url = f"https://www.vinted.fr/transaction/buy/new?source_screen=item&transaction%5Bitem_id%5D={self.id}"
+
+        # Timestamp
+        ts = None
+        if isinstance(data, dict) and "photo" in data and isinstance(data["photo"], dict) and "high_resolution" in data["photo"]:
+            ts = data["photo"]["high_resolution"].get("timestamp")
+        elif isinstance(data, dict) and "raw_timestamp" in data:
+            ts = data["raw_timestamp"]
+
+        if not ts:
+            ts = int(time.time())
+
+        self.raw_timestamp = int(ts)
+        self.created_at_ts = datetime.fromtimestamp(self.raw_timestamp, tz=timezone.utc)
 
     def __eq__(self, other):
         """

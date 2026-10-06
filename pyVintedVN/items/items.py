@@ -176,7 +176,16 @@ class Items:
             "time": time
         }
 
-        return params
+        # Remove empty string parameters
+        cleaned_params = {k: v for k, v in params.items() if v is not None and v != ""}
+
+        # Also preserve query parameters present in the URL that may not be in the predefined list
+        for key, val in queries:
+            norm_key = key.rstrip("[]")
+            if norm_key not in cleaned_params and key not in cleaned_params and val:
+                cleaned_params[key] = val
+
+        return cleaned_params
 
     # Aliases for backward compatibility
     parseUrl = parse_url
