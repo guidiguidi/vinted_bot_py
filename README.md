@@ -1,76 +1,54 @@
-# Vinted Notifications Bot
+# 👗 Vinted Marketplace Real-Time Scraper & Monitor
 
-Telegram-бот для мониторинга новых объявлений на Vinted в реальном времени с поддержкой фильтрации по странам и управления прокси.
-
----
-
-## 🚀 Основные возможности
-
-- 🔍 **Мониторинг Vinted**: отслеживание поисковых запросов пользователей с гибкой настройкой интервалов и мгновенными уведомлениями в Telegram.
-- 🌐 **Продвинутая работа с прокси**:
-  - Поддержка форматов `ip:port:user:pass`, `user:pass@ip:port`, `ip:port`, `http://...` и `socks5://`.
-  - Добавление единичных прокси и списков через Telegram-админку, команду `/addproxy` или в коде через `proxies.add_proxies()`.
-  - Загрузка прокси по ссылке (URL).
-  - Параллельная валидация прокси.
-  - Ротация User-Agent и статистика DataImpulse.
-- ⚙️ **Админ-панель в Telegram**:
-  - Управление списками прокси и параметрами скрейпера.
-  - Настройка разрешенных стран (allowlist).
-  - Рассылка сообщений и управление пользователями.
+A high-performance, asynchronous monitoring engine and Telegram notification service for **Vinted**, featuring dynamic residential proxy rotation, user-agent randomization, and SQLite deduplication.
 
 ---
 
-## 📦 Установка и запуск
+## 🚀 Key Highlights & Capabilities
 
-### 1. Клонирование и установка зависимостей
+Scraping Vinted at scale requires bypassing aggressive rate-limiting, IP reputation checks, and country-specific marketplace routing.
+
+### 1. 🔍 High-Concurrency Item Discovery
+- Real-time catalog polling with sub-minute latency.
+- Intelligent query management with user-defined filters (price bounds, country allowlists, brand/size queries).
+- Telegram bot interface providing instant interactive alerts with direct buy links, item photos, and seller ratings.
+
+### 2. 🌐 Advanced Proxy & Network Infrastructure (`proxies.py`)
+- **Multi-Format Ingestion:** Supports `ip:port:user:pass`, `user:pass@ip:port`, HTTP/HTTPS, and SOCKS5 residential protocols.
+- **Dynamic Pool Management:** Automatic health-checking, latency-based scoring, and automatic dead-proxy pruning.
+- **Provider Synchronization:** Native integration with proxy providers (e.g. DataImpulse) and remote endpoint proxy list auto-refreshing.
+- **Anti-Bot Rotation:** Synchronized User-Agent randomization and header normalization aligned with proxy geo-exit points.
+
+### 3. 💾 State Management & Deduplication
+- Asynchronous SQLite indexing preventing duplicate notifications across thousands of active searches.
+- Historical price drop tracking and instant alert dispatching to target Telegram channels.
+
+---
+
+## 🛠️ Tech Stack
+
+- **Language:** Python 3.11+ (AsyncIO, aiohttp)
+- **Database:** SQLite / SQLAlchemy for persistent state caching
+- **Interface:** Telegram Bot API (aiogram / pyTelegramBotAPI)
+- **Deployment:** Docker, systemd, Procfile support
+
+---
+
+## 🚀 Quickstart
+
 ```bash
-git clone <URL_РЕПОЗИТОРИЯ>
-cd vinted
+# Clone the repository
+git clone https://github.com/guidiguidi/vinted_bot_py.git
+cd vinted_bot_py
+
+# Set up environment
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2. Настройка конфигурации
-Всё, что требуется для работы — токен Telegram-бота в файле `.env`:
-```bash
-echo "TELEGRAM_TOKEN=ваш_токен_бота" > .env
-```
-*(Пример доступен в `.env.example`)*
+# Configure bot token
+echo "TELEGRAM_TOKEN=your_telegram_bot_token" > .env
 
-### 3. Назначение администратора
-```bash
-python3 make_me_admin.py
-```
-
-### 4. Запуск бота
-```bash
+# Run the monitoring engine
 python3 vinted_notifications.py
-```
-
----
-
-## 🌐 Управление прокси
-
-### Добавление прокси через Telegram-бот:
-1. В боте откройте **Админ панель** → **⚙️ Настройки бота** → **🌐 Прокси**.
-2. Нажмите кнопку **➕ Добавить прокси** и отправьте прокси в чат.
-3. Либо отправьте команду:
-   ```text
-   /addproxy ip:port:user:pass
-   ```
-
-### Добавление прокси через Python:
-```python
-from proxies import add_proxy, add_proxies, get_proxies_list
-
-# Добавить один прокси
-add_proxy("192.168.1.1:8080:user:pass")
-
-# Добавить несколько прокси (дубликаты пропускаются)
-added, total = add_proxies([
-    "1.2.3.4:8080:user:pass",
-    "http://user:pass@5.6.7.8:3128"
-])
-print(f"Добавлено: {added}, Всего в базе: {total}")
 ```
